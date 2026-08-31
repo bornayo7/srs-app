@@ -3,6 +3,7 @@ import { createCourse } from '@/db/repo/courses';
 import { createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
 import { createItem, type CreateItemInput } from '@/db/repo/items';
 import { extractBlank, isClozeSentences } from '@/engine/grading/cloze';
+import { DEFAULT_PASS_PERCENT } from '@/engine/levels';
 import type { Course, FieldValue, ItemType } from '@/engine/types';
 import type { CreateCoursePacket, AddItemsPacket, Packet, PacketItem } from './schema';
 
@@ -136,6 +137,7 @@ async function applyCreateCourse(packet: CreateCoursePacket, now: number): Promi
       );
 
       const types: ItemType[] = [];
+      // levelMode/gateTypes are applied after the types exist (they're by name)
       for (const [i, typeSpec] of packet.itemTypes.entries()) {
         const spec: SimpleTypeSpec = {
           name: typeSpec.name,
@@ -177,14 +179,37 @@ async function applyCreateCourse(packet: CreateCoursePacket, now: number): Promi
         types.push(await createItemType(course.id, spec, now));
       }
 
+      if (packet.course.levelMode === 'levels') {
+        const gateTypeIds = (packet.course.gateTypes ?? [])
+          .map((name) => types.find((t) => t.name.toLowerCase() === name.toLowerCase())?.id)
+          .filter((id): id is string => !!id);
+        await db.courses.put({
+          ...course,
+          levelMode: 'levels',
+          levelConfig: {
+            gateTypeIds,
+            passPercent: packet.course.passPercent ?? DEFAULT_PASS_PERCENT,
+          },
+          updatedAt: now,
+        });
+        course.levelMode = 'levels';
+      }
+
       let stamp = now;
+      const idByKey = new Map<string, string>();
       for (const [i, item] of packet.items.entries()) {
         const itemType = pickType(item, types, i);
         const resolved = resolveItem(item, itemType, i);
-        await createItem(
-          { courseId: course.id, typeId: itemType.id, ...resolved },
+        const created = await createItem(
+          {
+            courseId: course.id,
+            typeId: itemType.id,
+            ...resolved,
+            prereqIds: (item.prereqs ?? []).map((ref) => idByKey.get(ref) ?? ref),
+          },
           stamp++,
         );
+        if (item.key) idByKey.set(item.key, created.id);
       }
 
       return {
@@ -222,11 +247,29 @@ async function applyAddItems(packet: AddItemsPacket, now: number): Promise<Impor
     const types = await db.itemTypes.where('courseId').equals(course.id).toArray();
     if (types.length === 0) throw new Error(`Course "${course.name}" has no item types`);
 
+    // prereqs here may reference keys within this packet OR existing item ids
+    const existingIds = new Set(
+      await db.items.where('courseId').equals(course.id).primaryKeys(),
+    );
     let stamp = now;
+    const idByKey = new Map<string, string>();
     for (const [i, item] of packet.items.entries()) {
       const itemType = pickType(item, types, i);
       const resolved = resolveItem(item, itemType, i);
-      await createItem({ courseId: course.id, typeId: itemType.id, ...resolved }, stamp++);
+      const prereqIds = (item.prereqs ?? []).map((ref) => {
+        const id = idByKey.get(ref) ?? ref;
+        if (!idByKey.has(ref) && !existingIds.has(id)) {
+          throw new Error(
+            `Item ${i + 1}: unknown prerequisite "${ref}" — use a "key" defined earlier in this packet, or an existing item id from this course`,
+          );
+        }
+        return id;
+      });
+      const created = await createItem(
+        { courseId: course.id, typeId: itemType.id, ...resolved, prereqIds },
+        stamp++,
+      );
+      if (item.key) idByKey.set(item.key, created.id);
     }
 
     return {

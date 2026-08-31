@@ -102,6 +102,22 @@ const itemInput = z.object({
   fields: z
     .record(z.string(), z.string())
     .describe('Field NAME → value, using the exact field names of the item type'),
+  key: z
+    .string()
+    .optional()
+    .describe('Local handle so LATER items in this list can name this one as a prerequisite'),
+  prereqs: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Keys of items defined EARLIER in this list (or existing item ids). The item stays locked until all of them are learned to the pass stage — use for radical→kanji→vocab style chains.',
+    ),
+  level: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe('Level number when the course uses levels (default 1)'),
   synonyms: z
     .union([z.array(z.string()), z.record(z.string(), z.array(z.string()))])
     .optional()
@@ -186,6 +202,21 @@ server.tool(
       .enum(['classic', 'gentle', 'bunpro'])
       .optional()
       .describe('SRS ladder: classic (WaniKani 4h→4mo, burns), gentle (daily-life, never burns), bunpro (gradual 11 stages). Default classic.'),
+    levelMode: z
+      .enum(['flat', 'levels'])
+      .optional()
+      .describe('"levels" gates content behind level-ups (WaniKani style); default "flat".'),
+    gateTypes: z
+      .array(z.string())
+      .optional()
+      .describe('Item type NAMES whose passing drives level-ups (default: all types).'),
+    passPercent: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe('Percent of a level’s gate items that must pass to advance (default 90).'),
     itemType: z.object({
       name: z.string().describe('Singular noun, e.g. "Word", "Fact"'),
       icon: z.string().optional().describe('One emoji'),
@@ -206,7 +237,7 @@ server.tool(
     }),
     items: z.array(itemInput).min(1),
   },
-  async ({ name, description, ladderPreset, itemType, items }) => {
+  async ({ name, description, ladderPreset, levelMode, gateTypes, passPercent, itemType, items }) => {
     try {
       // proves the user has actually connected the exchange folder — otherwise
       // the packet would land somewhere the app never reads
@@ -215,7 +246,7 @@ server.tool(
         format: PACKET_FORMAT,
         version: PACKET_VERSION,
         kind: 'create-course',
-        course: { name, description, ladderPreset },
+        course: { name, description, ladderPreset, levelMode, gateTypes, passPercent },
         itemTypes: [
           {
             name: itemType.name,

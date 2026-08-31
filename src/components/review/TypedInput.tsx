@@ -1,22 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
+import { toKana } from 'wanakana';
 import type { Feedback } from '@/stores/sessionStore';
 
 /**
  * The answer box. One Enter submits; when feedback is showing, the next Enter
  * continues. Retry verdicts shake without grading.
+ *
+ * `answerLang: 'kana'` turns it into a kana IME: romaji converts as you type
+ * (ka → か), trailing consonants are held (kk → っk), and a final pass on
+ * submit closes leftovers like a trailing "n" → ん.
  */
 export function TypedInput({
   feedback,
   onSubmit,
   onContinue,
-  placeholder = 'Your answer',
+  answerLang = 'latin',
+  placeholder,
 }: {
   feedback: Feedback | null;
   onSubmit: (text: string) => void;
   onContinue: () => void;
+  answerLang?: 'latin' | 'kana';
   placeholder?: string;
 }) {
+  const kana = answerLang === 'kana';
   const [text, setText] = useState('');
+  const submit = () => onSubmit(kana ? toKana(text) : text);
   const [shakeNonce, setShakeNonce] = useState(0);
   const ref = useRef<HTMLInputElement>(null);
   const graded = feedback?.kind === 'correct' || feedback?.kind === 'incorrect';
@@ -51,7 +60,7 @@ export function TypedInput({
       onSubmit={(e) => {
         e.preventDefault();
         if (graded) onContinue();
-        else onSubmit(text);
+        else submit();
       }}
     >
       <div
@@ -61,7 +70,14 @@ export function TypedInput({
         <input
           ref={ref}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            const raw = e.target.value;
+            // Only run the IME while typing at the END of the box. Converting a
+            // mid-string edit would rewrite text behind the caret and bounce the
+            // caret to the end, so corrections would land in the wrong place.
+            const atEnd = e.target.selectionStart === raw.length;
+            setText(kana && atEnd ? toKana(raw, { IMEMode: true }) : raw);
+          }}
           onKeyDown={(e) => {
             // Explicit Enter handling — implicit form submission is unreliable
             // (no submit button, synthetic events, some mobile keyboards).
@@ -69,11 +85,12 @@ export function TypedInput({
             if (e.key === 'Enter' && !e.repeat) {
               e.preventDefault();
               if (graded) onContinue();
-              else onSubmit(text);
+              else submit();
             }
           }}
           readOnly={graded}
-          placeholder={placeholder}
+          lang={kana ? 'ja' : undefined}
+          placeholder={placeholder ?? (kana ? 'かな (type romaji)' : 'Your answer')}
           autoCapitalize="off"
           autoCorrect="off"
           autoComplete="off"

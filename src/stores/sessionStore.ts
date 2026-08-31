@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { Card, CardTemplate, Item, ItemType } from '@/engine/types';
 import { matchTypedAnswer, type MatchContext, type MatchVerdict } from '@/engine/grading/match';
 import { buildMatchContext } from '@/engine/grading/context';
-import { containsKana } from '@/engine/grading/normalize';
+import { isKanaTypeable } from '@/engine/grading/normalize';
 import { pickClozeSentence, type ClozePick } from '@/engine/grading/cloze';
 import { mulberry32, orderEntries, reinsertIndex } from '@/engine/queue';
 import { newId } from '@/engine/ids';
@@ -29,11 +29,18 @@ export function entryMatchContext(entry: SessionEntry): MatchContext {
       blocked: entry.item.blockList[entry.template.id] ?? [],
       guidance: entry.item.guidance[entry.template.id] ?? [],
       siblingAccepted: [],
-      answerLang: containsKana(entry.cloze.blank) ? 'kana' : 'latin',
+      // kana-only blanks get the romaji IME; a blank containing kanji must not
+      // (romaji can't produce kanji, and the IME would mangle the attempt)
+      answerLang: isKanaTypeable(entry.cloze.blank) ? 'kana' : 'latin',
       typoTolerance: true,
     };
   }
   return buildMatchContext(entry.item, entry.itemType, entry.template);
+}
+
+/** Which script the answer box should type in — drives the kana IME. */
+export function entryAnswerLang(entry: SessionEntry): 'latin' | 'kana' {
+  return entryMatchContext(entry).answerLang;
 }
 
 /** Attach a cloze pick when the template is sentence-cloze. Exported for reuse. */
@@ -52,6 +59,10 @@ export interface CompletedReview {
   toStage: number | null;
   burned: boolean;
   logId: string;
+  /** Prerequisite/level cascade this answer triggered. */
+  itemPassed: boolean;
+  unlockedCount: number;
+  leveledUpTo: number | null;
 }
 
 export type Feedback =
@@ -217,6 +228,9 @@ export const useSession = create<SessionState>((set, get) => ({
         toStage: res.toStage,
         burned: res.burned,
         logId: res.logId,
+        itemPassed: res.gating.itemPassed,
+        unlockedCount: res.gating.unlockedItemIds.length,
+        leveledUpTo: res.gating.leveledUpTo,
       };
       set({
         completed: [...after.completed, done],

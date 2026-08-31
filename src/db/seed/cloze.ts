@@ -12,24 +12,30 @@ export const clozeSeed: SeedCourse = {
   ladderPresetId: 'preset-bunpro',
   newPerDay: 10,
   batchSize: 5,
-  type: {
-    name: 'Preposition',
-    color: '#f59e0b',
-    icon: '🧩',
-    fields: [
-      { name: 'Word', kind: 'text' },
-      { name: 'Meaning', kind: 'text' },
-      { name: 'Sentences', kind: 'clozeSentences' },
-    ],
-    templates: [
-      {
-        name: 'Cloze',
-        promptFieldNames: ['Meaning'],
-        answerFieldName: 'Sentences',
-        grading: { mode: 'sentenceCloze', sentencesFieldId: '', rotation: 'random' },
-      },
-    ],
-  },
+  types: [
+    {
+      name: 'Preposition',
+      color: '#f59e0b',
+      icon: '🧩',
+      fields: [
+        { name: 'Word', kind: 'text' },
+        { name: 'Meaning', kind: 'text' },
+        { name: 'Sentences', kind: 'clozeSentences' },
+      ],
+      templates: [
+        {
+          name: 'Cloze',
+          promptFieldNames: ['Meaning'],
+          answerFieldName: 'Sentences',
+          grading: {
+            mode: 'sentenceCloze',
+            sentencesFieldId: '',
+            rotation: 'random',
+          },
+        },
+      ],
+    },
+  ],
   items: [
     {
       fields: {

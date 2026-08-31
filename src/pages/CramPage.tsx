@@ -6,7 +6,13 @@ import type { Card, Item, ItemType } from '@/engine/types';
 import { matchTypedAnswer } from '@/engine/grading/match';
 import { mulberry32, seededShuffle } from '@/engine/queue';
 import { DAY } from '@/engine/time';
-import { entryMatchContext, withClozePick, type Feedback, type SessionEntry } from '@/stores/sessionStore';
+import {
+  entryAnswerLang,
+  entryMatchContext,
+  withClozePick,
+  type Feedback,
+  type SessionEntry,
+} from '@/stores/sessionStore';
 import { CardPrompt } from '@/components/review/CardPrompt';
 import { TypedInput } from '@/components/review/TypedInput';
 import { Badge, Button } from '@/components/ui';
@@ -151,7 +157,9 @@ export default function CramPage() {
       <CardPrompt key={entry.card.id} entry={entry} feedback={feedback} />
       <div className="mt-5">
         <TypedInput
+          key={entry.card.id}
           feedback={feedback}
+          answerLang={entryAnswerLang(entry)}
           onSubmit={(text) => {
             const ctx = entryMatchContext(entry);
             const v = matchTypedAnswer(text, ctx);

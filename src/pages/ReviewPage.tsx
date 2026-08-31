@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { useSession } from '@/stores/sessionStore';
+import { entryAnswerLang, useSession } from '@/stores/sessionStore';
 import { CardPrompt } from '@/components/review/CardPrompt';
 import { TypedInput } from '@/components/review/TypedInput';
 import { SessionSummary } from '@/components/review/SessionSummary';
@@ -100,6 +100,7 @@ export default function ReviewPage() {
         <TypedInput
           key={entry.card.id}
           feedback={s.feedback}
+          answerLang={entryAnswerLang(entry)}
           onSubmit={(text) => void s.submit(text)}
           onContinue={s.continueNext}
         />

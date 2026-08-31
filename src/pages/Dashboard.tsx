@@ -20,6 +20,7 @@ import { installSeed, isSeedInstalled } from '@/db/seed';
 import { gentleSeed } from '@/db/seed/gentle';
 import { techSeed } from '@/db/seed/tech';
 import { clozeSeed } from '@/db/seed/cloze';
+import { japaneseSeed } from '@/db/seed/japanese';
 import { GenerateCoursePanel } from '@/components/ai/GenerateCoursePanel';
 import type { Course } from '@/engine/types';
 
@@ -31,9 +32,14 @@ function CourseRow({ course, t }: { course: Course; t: number }) {
       <div className="min-w-0">
         <Link
           to={`/course/${course.id}`}
-          className="block truncate font-semibold text-slate-100 hover:text-violet-300"
+          className="flex items-center gap-2 truncate font-semibold text-slate-100 hover:text-violet-300"
         >
           {course.name}
+          {course.levelMode === 'levels' && (
+            <span className="shrink-0 rounded bg-violet-950/60 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">
+              Lv {course.currentLevel}
+            </span>
+          )}
         </Link>
         <p className="truncate text-xs text-slate-500">{course.description}</p>
       </div>
@@ -175,8 +181,9 @@ function QuickCapture() {
 
 function SeedOffers() {
   const t = useNowTick(60_000);
+  const [installError, setInstallError] = useState('');
   const missing = useLiveQuery(async () => {
-    const seeds = [gentleSeed, techSeed, clozeSeed];
+    const seeds = [gentleSeed, techSeed, clozeSeed, japaneseSeed];
     const flags = await Promise.all(seeds.map(isSeedInstalled));
     return seeds.filter((_, i) => !flags[i]);
   }, []);
@@ -185,13 +192,25 @@ function SeedOffers() {
     <Panel title="Sample courses">
       <div className="flex flex-wrap gap-2">
         {missing.map((s) => (
-          <Button key={s.key} onClick={() => installSeed(s, t)}>
+          <Button
+            key={s.key}
+            onClick={async () => {
+              setInstallError('');
+              try {
+                await installSeed(s, t);
+              } catch (err) {
+                setInstallError(`Could not install "${s.name}": ${(err as Error).message}`);
+              }
+            }}
+          >
             + {s.name}
           </Button>
         ))}
       </div>
+      {installError && <p className="mt-2 text-sm text-rose-300">{installError}</p>}
       <p className="mt-2 text-xs text-slate-500">
-        Two ready-made courses to try the review loop — safe to delete later.
+        Ready-made courses covering every feature — typed recall, sentence cloze, and the
+        WaniKani-style radical→kanji→vocab unlock chain. Safe to delete later.
       </p>
     </Panel>
   );

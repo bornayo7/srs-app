@@ -3,6 +3,7 @@ import { newId } from '@/engine/ids';
 import type { Card, CardSnapshot, ReviewLog, ReviewOutcome } from '@/engine/types';
 import { ghostScheduler, schedulerForCourse } from './schedulers';
 import { maybeSpawnGhost } from './ghosts';
+import { applyGatingAfterReview, type GatingOutcome } from './gating';
 
 export interface CommitReviewInput {
   cardId: string;
@@ -17,6 +18,8 @@ export interface CommitReviewResult {
   fromStage: number | null;
   toStage: number | null;
   burned: boolean;
+  /** Prerequisite/level cascade triggered by this review (never for ghosts). */
+  gating: GatingOutcome;
 }
 
 type PostCommitHook = (args: { card: Card; now: number }) => Promise<void>;
@@ -127,6 +130,11 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
         await maybeSpawnGhost(course, card, input.outcome.incorrectCount, input.now);
       }
 
+      // ghost drills are practice only — they never pass items or move levels
+      const gating = card.isGhost
+        ? { itemPassed: false, unlockedItemIds: [], leveledUpTo: null }
+        : await applyGatingAfterReview(course, card.itemId, input.now);
+
       for (const hook of postCommitHooks) {
         await hook({ card: updated, now: input.now });
       }
@@ -137,6 +145,7 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
         fromStage,
         toStage,
         burned: applied.dueAt === null,
+        gating,
       };
     },
   );

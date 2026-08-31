@@ -1,7 +1,34 @@
 import { db } from '@/db/db';
 import { isClozeSentences } from '@/engine/grading/cloze';
+import type { Item } from '@/engine/types';
 import type { CreateCoursePacket, PacketItem } from './schema';
 import { PACKET_FORMAT, PACKET_VERSION } from './schema';
+
+/**
+ * Dependency order, then level, then creation time. The packet format requires
+ * a prerequisite to appear before the items that reference it, so emitting in
+ * plain creation order would produce an unimportable file for edited graphs.
+ */
+function topoSort(items: Item[]): Item[] {
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const ordered: Item[] = [];
+  const state = new Map<string, 'visiting' | 'done'>();
+  const visit = (item: Item) => {
+    const s = state.get(item.id);
+    if (s === 'done' || s === 'visiting') return; // 'visiting' ⇒ cycle: break it
+    state.set(item.id, 'visiting');
+    for (const pid of item.prereqIds) {
+      const prereq = byId.get(pid);
+      if (prereq) visit(prereq);
+    }
+    state.set(item.id, 'done');
+    ordered.push(item);
+  };
+  for (const item of [...items].sort((a, b) => a.level - b.level || a.createdAt - b.createdAt)) {
+    visit(item);
+  }
+  return ordered;
+}
 
 /**
  * Export a course as a content-only create-course packet (no SRS state) —
@@ -21,8 +48,8 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
       ? ('bunpro' as const)
       : ('classic' as const);
 
-  const packetItems: PacketItem[] = items
-    .sort((a, b) => a.level - b.level || a.createdAt - b.createdAt)
+  const exportedIds = new Set(items.map((i) => i.id));
+  const packetItems: PacketItem[] = topoSort(items)
     .map((item) => {
       const itemType = types.find((t) => t.id === item.typeId);
       if (!itemType) return null;
@@ -45,8 +72,14 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
                 syns,
               ]),
             );
+      // only edges to items in THIS packet — a reference to anything else
+      // would fail the packet's own "defined earlier" validation on import
+      const prereqs = item.prereqIds.filter((id) => exportedIds.has(id));
       return {
         type: itemType.name,
+        // stable handle so prereq edges survive the round trip
+        key: item.id,
+        ...(prereqs.length > 0 ? { prereqs } : {}),
         fields,
         ...(synonyms ? { synonyms } : {}),
         ...(item.note ? { note: item.note } : {}),
@@ -65,6 +98,15 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
       ladderPreset,
       newPerDay: course.lessons.newPerDay,
       batchSize: course.lessons.batchSize,
+      ...(course.levelMode === 'levels'
+        ? {
+            levelMode: 'levels' as const,
+            gateTypes: (course.levelConfig?.gateTypeIds ?? [])
+              .map((id) => types.find((t) => t.id === id)?.name)
+              .filter((n): n is string => !!n),
+            passPercent: course.levelConfig?.passPercent,
+          }
+        : {}),
     },
     itemTypes: types.map((t) => ({
       name: t.name,

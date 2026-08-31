@@ -11,8 +11,10 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
 
 - **WaniKani-style SRS**: editable stage ladders (Classic 4h→4mo with burning, Gentle,
   Bunpro-like), hour-aligned due times, wrong answers drop stages by the real WK formula
+- **Prerequisite gating & levels**: items unlock only when their prerequisites *pass*
+  (radical → kanji → vocab), and levels advance when enough of the level's gate items pass
 - **Typed reviews**: typo tolerance (Damerau-Levenshtein), synonyms, block lists, wrong-facet
-  shake, kana/kanji-aware input guards
+  shake, kana/kanji-aware input guards, and a built-in **kana IME** (type `moku` → もく)
 - **Lessons**: batched study + quiz gate with a daily new-item limit
 - **Ghost reviews** (Bunpro-style): missed cards spawn short-cycle drill ghosts that graduate
   and vanish, without touching the parent card's schedule
@@ -46,7 +48,8 @@ the Inbox. See [srs-mcp/README.md](srs-mcp/README.md).
 
 ## Architecture
 
-- `src/engine/` — pure TypeScript: schedulers, grading pipeline, queue, forecast (the test target)
+- `src/engine/` — pure TypeScript: schedulers, grading pipeline, gating/levels, queue, forecast
+  (the test target)
 - `src/db/` — Dexie (IndexedDB) schema, repos, backup import/export
 - `src/services/` — transactional write paths (`commitReview` is the one place reviews commit)
 - `src/packages/` — the `srs-packet` format: one validated JSON shape shared by MCP, AI

@@ -122,6 +122,15 @@ describe('matchTypedAnswer pipeline', () => {
     expect(r).toMatchObject({ verdict: 'retry', reason: 'alphabet' });
   });
 
+  it('katakana answers accept hiragana (a romaji IME can only produce hiragana)', () => {
+    const r = matchTypedAnswer('こーひー', ctx({ accepted: ['コーヒー'], answerLang: 'kana' }));
+    expect(r).toMatchObject({ verdict: 'correct' });
+    // and the reverse, for anyone with a real Japanese keyboard
+    expect(
+      matchTypedAnswer('コーヒー', ctx({ accepted: ['こーひー'], answerLang: 'kana' })),
+    ).toMatchObject({ verdict: 'correct' });
+  });
+
   it('mixed-script accepted answers stay answerable (exact runs before the script guard)', () => {
     const r = matchTypedAnswer('kabuki 歌舞伎', ctx({ accepted: ['kabuki 歌舞伎'] }));
     expect(r).toMatchObject({ verdict: 'correct' });

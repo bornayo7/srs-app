@@ -172,6 +172,90 @@ describe('applyPacket add-items', () => {
   });
 });
 
+describe('prerequisites and levels through packets', () => {
+  const gated = {
+    format: PACKET_FORMAT,
+    version: PACKET_VERSION,
+    kind: 'create-course',
+    course: { name: 'Gated', levelMode: 'levels', gateTypes: ['Kanji'], passPercent: 90 },
+    itemTypes: [
+      {
+        name: 'Radical',
+        fields: [{ name: 'Sign' }, { name: 'Meaning' }],
+        templates: [{ name: 'Meaning', promptFields: ['Sign'], answerField: 'Meaning' }],
+      },
+      {
+        name: 'Kanji',
+        fields: [{ name: 'Char' }, { name: 'Meaning' }],
+        templates: [{ name: 'Meaning', promptFields: ['Char'], answerField: 'Meaning' }],
+      },
+    ],
+    items: [
+      { type: 'Radical', key: 'r1', fields: { Sign: '亅', Meaning: 'barb' } },
+      { type: 'Kanji', key: 'k1', prereqs: ['r1'], fields: { Char: '了', Meaning: 'finish' } },
+      { type: 'Kanji', key: 'k2', prereqs: ['r1'], level: 2, fields: { Char: '予', Meaning: 'beforehand' } },
+    ],
+  };
+
+  it('resolves prereq keys to ids and locks dependents at import', async () => {
+    const res = await applyPacket(parsePacket(gated), NOW);
+    const items = await db.items.where('courseId').equals(res.courseId).toArray();
+    const radical = items.find((i) => Object.values(i.fieldValues).includes('亅'))!;
+    const kanji = items.find((i) => Object.values(i.fieldValues).includes('了'))!;
+    const level2 = items.find((i) => Object.values(i.fieldValues).includes('予'))!;
+
+    expect(radical.status).toBe('lesson'); // no prereqs, level 1
+    expect(kanji.prereqIds).toEqual([radical.id]); // key → real id
+    expect(kanji.status).toBe('locked');
+    expect(level2.level).toBe(2);
+    expect(level2.status).toBe('locked');
+
+    const course = (await db.courses.get(res.courseId))!;
+    expect(course.levelMode).toBe('levels');
+    const kanjiType = (await db.itemTypes.where('courseId').equals(res.courseId).toArray()).find(
+      (t) => t.name === 'Kanji',
+    )!;
+    expect(course.levelConfig).toEqual({ gateTypeIds: [kanjiType.id], passPercent: 90 });
+  });
+
+  it('rejects a prereq that is not defined earlier in the packet', () => {
+    const bad = structuredClone(gated) as { items: { prereqs?: string[] }[] };
+    bad.items[0].prereqs = ['nope'];
+    expect(() => parsePacket(bad)).toThrow(/unknown prerequisite "nope"/);
+  });
+
+  it('rejects duplicate item keys and unknown gate types', () => {
+    const dupKey = structuredClone(gated) as { items: { key?: string }[] };
+    dupKey.items[1].key = 'r1';
+    expect(() => parsePacket(dupKey)).toThrow(/duplicate item key/);
+
+    const badGate = structuredClone(gated) as { course: { gateTypes?: string[] } };
+    badGate.course.gateTypes = ['Vocab'];
+    expect(() => parsePacket(badGate)).toThrow(/unknown item type "Vocab"/);
+  });
+
+  it('export → import preserves the dependency graph and level config', async () => {
+    const first = await applyPacket(parsePacket(gated), NOW);
+    const pkg = await exportCoursePackage(first.courseId);
+    expect(pkg.course.levelMode).toBe('levels');
+    expect(pkg.course.gateTypes).toEqual(['Kanji']);
+    // prereqs must reference something defined earlier in the emitted array
+    const seen = new Set<string>();
+    for (const it of pkg.items) {
+      for (const ref of it.prereqs ?? []) expect(seen.has(ref)).toBe(true);
+      if (it.key) seen.add(it.key);
+    }
+
+    pkg.course.name = 'Gated Copy';
+    const second = await applyPacket(parsePacket(pkg), NOW + 1000);
+    const items = await db.items.where('courseId').equals(second.courseId).toArray();
+    const radical = items.find((i) => Object.values(i.fieldValues).includes('亅'))!;
+    const kanji = items.find((i) => Object.values(i.fieldValues).includes('了'))!;
+    expect(kanji.prereqIds).toEqual([radical.id]);
+    expect(kanji.status).toBe('locked');
+  });
+});
+
 describe('sentence-cloze course round trip', () => {
   it('export preserves the clozeSentences kind so re-import stays a cloze course', async () => {
     const { clozeSeed } = await import('@/db/seed/cloze');
