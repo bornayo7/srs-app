@@ -1,7 +1,8 @@
 import { db } from '@/db/db';
 import { newId } from '@/engine/ids';
 import type { Card, CardSnapshot, ReviewLog, ReviewOutcome } from '@/engine/types';
-import { schedulerForCourse } from './schedulers';
+import { ghostScheduler, schedulerForCourse } from './schedulers';
+import { maybeSpawnGhost } from './ghosts';
 
 export interface CommitReviewInput {
   cardId: string;
@@ -47,7 +48,10 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
       }
       const course = await db.courses.get(card.courseId);
       if (!course) throw new Error(`course not found: ${card.courseId}`);
-      const { scheduler } = await schedulerForCourse(course);
+      // ghosts drill on their own fixed ladder, independent of the course's
+      const { scheduler } = card.isGhost
+        ? await ghostScheduler()
+        : await schedulerForCourse(course);
 
       const prev: CardSnapshot = {
         state: card.state,
@@ -79,7 +83,13 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
       } else {
         updated.dueAt = applied.dueAt;
       }
-      await db.cards.put(updated);
+      const ghostGraduated = applied.dueAt === null && card.isGhost === true;
+      if (ghostGraduated) {
+        // graduating a ghost deletes it — the log's cardMeta allows undo to resurrect
+        await db.cards.delete(card.id);
+      } else {
+        await db.cards.put(updated);
+      }
 
       const toStage = applied.srs.kind === 'ladder' ? applied.srs.stageIndex : null;
       const log: ReviewLog = {
@@ -105,8 +115,17 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
                 scheduledDays: 0,
               },
         prev,
+        cardMeta: {
+          templateId: card.templateId,
+          ...(card.isGhost ? { isGhost: true, parentCardId: card.parentCardId } : {}),
+        },
       };
       await db.reviewLogs.add(log);
+
+      // a miss may spawn a drill ghost (policy-gated; never for ghost cards)
+      if (input.outcome.kind === 'ladder') {
+        await maybeSpawnGhost(course, card, input.outcome.incorrectCount, input.now);
+      }
 
       for (const hook of postCommitHooks) {
         await hook({ card: updated, now: input.now });

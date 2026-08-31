@@ -13,7 +13,13 @@ import { z } from 'zod';
 export const PACKET_FORMAT = 'srs-packet' as const;
 export const PACKET_VERSION = 1 as const;
 
-const fieldValue = z.union([z.string(), z.array(z.string())]);
+const clozeSentence = z.object({
+  text: z.string().min(1), // blank marked ⟦like this⟧
+  translation: z.string().optional(),
+  hint: z.string().optional(),
+});
+
+const fieldValue = z.union([z.string(), z.array(z.string()), z.array(clozeSentence)]);
 
 export const packetItemSchema = z.object({
   /** ItemType NAME; may be omitted when the course has exactly one type. */
@@ -43,7 +49,12 @@ export const packetItemTypeSchema = z.object({
   icon: z.string().optional(),
   color: z.string().optional(),
   fields: z
-    .array(z.object({ name: z.string().min(1), kind: z.enum(['text', 'list']).optional() }))
+    .array(
+      z.object({
+        name: z.string().min(1),
+        kind: z.enum(['text', 'list', 'clozeSentences']).optional(),
+      }),
+    )
     .min(1),
   templates: z.array(packetTemplateSchema).min(1),
 });

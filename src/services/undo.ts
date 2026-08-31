@@ -10,8 +10,25 @@ export async function undoReview(logId: string): Promise<Card | null> {
   return db.transaction('rw', [db.cards, db.reviewLogs], async () => {
     const log = await db.reviewLogs.get(logId);
     if (!log || log.kind !== 'review') return null;
-    const card = await db.cards.get(log.cardId);
-    if (!card) return null;
+    let card = await db.cards.get(log.cardId);
+
+    if (!card) {
+      // graduated ghosts are deleted on commit — resurrect from the log
+      if (!log.cardMeta) return null;
+      card = {
+        id: log.cardId,
+        itemId: log.itemId,
+        courseId: log.courseId,
+        templateId: log.cardMeta.templateId,
+        state: log.prev.state,
+        ...(log.cardMeta.isGhost
+          ? { isGhost: true, parentCardId: log.cardMeta.parentCardId }
+          : {}),
+        srs: log.prev.srs,
+        stats: { ...log.prev.stats },
+        updatedAt: log.ts,
+      };
+    }
 
     const restored: Card = {
       ...card,

@@ -30,6 +30,7 @@ export async function saveLadderEdit(edited: SrsLadder, now: number): Promise<vo
       .toArray();
 
     for (const card of cards) {
+      if (card.isGhost) continue; // ghosts run on the fixed ghost ladder, not this one
       if (card.srs?.kind !== 'ladder') continue;
       const oldStage = previous.stages[card.srs.stageIndex];
       const remapped =

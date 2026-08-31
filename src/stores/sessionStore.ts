@@ -1,7 +1,9 @@
 import { create } from 'zustand';
 import type { Card, CardTemplate, Item, ItemType } from '@/engine/types';
-import { matchTypedAnswer, type MatchVerdict } from '@/engine/grading/match';
+import { matchTypedAnswer, type MatchContext, type MatchVerdict } from '@/engine/grading/match';
 import { buildMatchContext } from '@/engine/grading/context';
+import { containsKana } from '@/engine/grading/normalize';
+import { pickClozeSentence, type ClozePick } from '@/engine/grading/cloze';
 import { mulberry32, orderEntries, reinsertIndex } from '@/engine/queue';
 import { newId } from '@/engine/ids';
 import { db } from '@/db/db';
@@ -15,6 +17,32 @@ export interface SessionEntry {
   item: Item;
   itemType: ItemType;
   template: CardTemplate;
+  /** Present for sentence-cloze templates: the sentence chosen for this session. */
+  cloze?: ClozePick;
+}
+
+/** Grading context for any entry, cloze-aware. Exported for the cram page. */
+export function entryMatchContext(entry: SessionEntry): MatchContext {
+  if (entry.cloze) {
+    return {
+      accepted: [entry.cloze.blank, ...(entry.item.synonyms[entry.template.id] ?? [])],
+      blocked: entry.item.blockList[entry.template.id] ?? [],
+      guidance: entry.item.guidance[entry.template.id] ?? [],
+      siblingAccepted: [],
+      answerLang: containsKana(entry.cloze.blank) ? 'kana' : 'latin',
+      typoTolerance: true,
+    };
+  }
+  return buildMatchContext(entry.item, entry.itemType, entry.template);
+}
+
+/** Attach a cloze pick when the template is sentence-cloze. Exported for reuse. */
+export function withClozePick<T extends Omit<SessionEntry, 'cloze'>>(
+  entry: T,
+  seed: number,
+): T & { cloze?: ClozePick } {
+  const cloze = pickClozeSentence(entry.item, entry.template, seed, entry.card.stats.reviews);
+  return cloze ? { ...entry, cloze } : entry;
 }
 
 export interface CompletedReview {
@@ -86,12 +114,15 @@ export const useSession = create<SessionState>((set, get) => ({
         .map((t) => [t.id, t]),
     );
 
+    const sessionSeed = now() & 0x7fffffff;
     const entries: SessionEntry[] = [];
-    for (const card of cards) {
+    for (const [i, card] of cards.entries()) {
       const item = items.get(card.itemId);
       const itemType = item && types.get(item.typeId);
       const template = itemType?.templates.find((t) => t.id === card.templateId);
-      if (item && itemType && template) entries.push({ card, item, itemType, template });
+      if (item && itemType && template) {
+        entries.push(withClozePick({ card, item, itemType, template }, sessionSeed + i));
+      }
     }
 
     const sortable = entries.map((e) => ({
@@ -122,7 +153,7 @@ export const useSession = create<SessionState>((set, get) => ({
       return;
     }
 
-    const ctx = buildMatchContext(entry.item, entry.itemType, entry.template);
+    const ctx = entryMatchContext(entry);
     const verdict: MatchVerdict = matchTypedAnswer(input, ctx);
 
     if (verdict.verdict === 'retry') {
@@ -155,12 +186,28 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ busy: true });
     try {
       const incorrectCount = s.incorrectCounts[entry.card.id] ?? 0;
-      const res = await commitReview({
-        cardId: entry.card.id,
-        sessionId: s.sessionId,
-        outcome: { kind: 'ladder', incorrectCount },
-        now: now(),
-      });
+      let res;
+      try {
+        res = await commitReview({
+          cardId: entry.card.id,
+          sessionId: s.sessionId,
+          outcome: { kind: 'ladder', incorrectCount },
+          now: now(),
+        });
+      } catch (err) {
+        // surface commit failures as a retryable notice instead of a silent hang
+        if (get().sessionId === s.sessionId) {
+          set({
+            feedback: {
+              kind: 'retry',
+              reason: 'empty',
+              message: `Couldn't save the answer (${(err as Error).message.slice(0, 80)}) — press Enter to retry.`,
+              nonce: Date.now(),
+            },
+          });
+        }
+        return;
+      }
       const after = get();
       if (after.sessionId !== s.sessionId) return;
       const done: CompletedReview = {

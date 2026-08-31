@@ -1,4 +1,5 @@
 import { db } from '@/db/db';
+import { isClozeSentences } from '@/engine/grading/cloze';
 import type { CreateCoursePacket, PacketItem } from './schema';
 import { PACKET_FORMAT, PACKET_VERSION } from './schema';
 
@@ -25,10 +26,11 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
     .map((item) => {
       const itemType = types.find((t) => t.id === item.typeId);
       if (!itemType) return null;
-      const fields: Record<string, string | string[]> = {};
+      const fields: PacketItem['fields'] = {};
       for (const f of itemType.fields) {
         const v = item.fieldValues[f.id];
         if (typeof v === 'string' && v) fields[f.name] = v;
+        else if (isClozeSentences(v)) fields[f.name] = v;
         else if (Array.isArray(v) && v.length && typeof v[0] === 'string') {
           fields[f.name] = v as string[];
         }
@@ -70,7 +72,12 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
       color: t.color,
       fields: t.fields.map((f) => ({
         name: f.name,
-        kind: f.kind === 'list' ? ('list' as const) : ('text' as const),
+        kind:
+          f.kind === 'list'
+            ? ('list' as const)
+            : f.kind === 'clozeSentences'
+              ? ('clozeSentences' as const)
+              : ('text' as const),
       })),
       templates: t.templates.map((tpl) => ({
         name: tpl.name,

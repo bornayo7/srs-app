@@ -7,9 +7,9 @@ export const EXPORT_FORMAT_VERSION = 1;
  * - the exchange dir handle is a FileSystemDirectoryHandle (structured-cloneable
  *   for IndexedDB but NOT JSON-serializable — it would export as {} and restore
  *   as a dead handle)
- * - the AI key is a secret; backup files get shared, keys should not.
+ * - AI keys are secrets; backup files get shared, keys should not.
  */
-const NON_EXPORTABLE_META_KEYS = new Set(['exchange:dirHandle', 'ai:apiKey']);
+const NON_EXPORTABLE_META_KEYS = new Set(['exchange:dirHandle', 'ai:apiKey', 'ai:openaiKey']);
 
 export interface BackupFile {
   app: 'srs-app';
@@ -23,6 +23,7 @@ export interface BackupFile {
     cards: unknown[];
     reviewLogs: unknown[];
     meta: unknown[];
+    captures?: unknown[];
   };
 }
 
@@ -30,7 +31,7 @@ export interface BackupFile {
 export async function exportAll(now: number): Promise<BackupFile> {
   return db.transaction(
     'r',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta],
+    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta, db.captures],
     async () => ({
       app: 'srs-app' as const,
       formatVersion: EXPORT_FORMAT_VERSION,
@@ -43,6 +44,7 @@ export async function exportAll(now: number): Promise<BackupFile> {
         cards: await db.cards.toArray(),
         reviewLogs: await db.reviewLogs.toArray(),
         meta: (await db.meta.toArray()).filter((row) => !NON_EXPORTABLE_META_KEYS.has(row.key)),
+        captures: await db.captures.toArray(),
       },
     }),
   );

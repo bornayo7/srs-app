@@ -115,6 +115,10 @@ const reviewLog = z
 
 const metaRow = z.object({ key: z.string(), value: z.unknown() }).catchall(z.unknown());
 
+const capture = z
+  .object({ id: z.string(), text: z.string(), createdAt: z.number() })
+  .catchall(z.unknown());
+
 export const backupSchema = z.object({
   app: z.literal('srs-app'),
   formatVersion: z.literal(EXPORT_FORMAT_VERSION),
@@ -127,6 +131,7 @@ export const backupSchema = z.object({
     cards: z.array(card),
     reviewLogs: z.array(reviewLog),
     meta: z.array(metaRow),
+    captures: z.array(capture).optional(), // added in schema v2 backups
   }),
 });
 
@@ -135,14 +140,22 @@ export const backupSchema = z.object({
  * Throws (and changes nothing) if validation fails — the transaction guarantees it.
  */
 /** Keys that live only in this browser and must survive a backup restore. */
-const LOCAL_ONLY_META_KEYS = ['exchange:dirHandle', 'ai:apiKey', 'ai:model'];
+const LOCAL_ONLY_META_KEYS = [
+  'exchange:dirHandle',
+  'ai:apiKey',
+  'ai:openaiKey',
+  'ai:model',
+  'ai:openaiModel',
+  'ai:openaiBaseUrl',
+  'ai:provider',
+];
 
 export async function importAll(raw: unknown): Promise<{ courses: number; items: number }> {
   const parsed = backupSchema.parse(raw) as unknown as BackupFile;
 
   await db.transaction(
     'rw',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta],
+    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta, db.captures],
     async () => {
       // backups exclude these on purpose — carry them across the wipe
       const localOnly = (await db.meta.bulkGet(LOCAL_ONLY_META_KEYS)).filter(
@@ -156,6 +169,7 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
         db.cards.clear(),
         db.reviewLogs.clear(),
         db.meta.clear(),
+        db.captures.clear(),
       ]);
       await db.meta.bulkPut(localOnly);
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -167,6 +181,7 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
       await db.reviewLogs.bulkAdd(parsed.data.reviewLogs as any[]);
       // bulkPut, not bulkAdd: keys may overlap the preserved local-only rows
       await db.meta.bulkPut(parsed.data.meta as any[]);
+      if (parsed.data.captures) await db.captures.bulkAdd(parsed.data.captures as any[]);
       /* eslint-enable @typescript-eslint/no-explicit-any */
     },
   );

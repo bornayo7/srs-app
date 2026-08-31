@@ -5,6 +5,8 @@ import LessonPage from '@/pages/LessonPage';
 import ReviewPage from '@/pages/ReviewPage';
 import SettingsPage from '@/pages/SettingsPage';
 import InboxPage from '@/pages/InboxPage';
+import CramPage from '@/pages/CramPage';
+import StatsPage from '@/pages/StatsPage';
 
 export default function App() {
   return (
@@ -24,6 +26,14 @@ export default function App() {
               }
             >
               Dashboard
+            </NavLink>
+            <NavLink
+              to="/stats"
+              className={({ isActive }) =>
+                `text-sm ${isActive ? 'text-violet-300' : 'text-slate-400 hover:text-slate-200'}`
+              }
+            >
+              Stats
             </NavLink>
             <NavLink
               to="/inbox"
@@ -49,6 +59,8 @@ export default function App() {
             <Route path="/course/:courseId" element={<CoursePage />} />
             <Route path="/lessons/:courseId" element={<LessonPage />} />
             <Route path="/review/:courseId" element={<ReviewPage />} />
+            <Route path="/cram/:courseId" element={<CramPage />} />
+            <Route path="/stats" element={<StatsPage />} />
             <Route path="/inbox" element={<InboxPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>

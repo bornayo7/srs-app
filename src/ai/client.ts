@@ -1,47 +1,222 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { getAiConfig } from './config';
+import OpenAI from 'openai';
+import { z } from 'zod';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { aiConfigReady, getAiConfig, type AiConfig } from './config';
 
 /**
- * Browser-direct Anthropic client. The key is the user's own, stored locally
- * in IndexedDB and sent only to api.anthropic.com — there is no app server.
+ * Provider-agnostic AI calls, browser-direct with the user's own key.
+ * - Anthropic: structured outputs via messages.parse + zodOutputFormat.
+ * - OpenAI-compatible (OpenAI, Gemini, OpenRouter, Ollama, …): JSON mode with
+ *   zod validation and one self-correction retry; request features degrade
+ *   gracefully for servers that reject max_completion_tokens/response_format.
  */
-export async function makeClient(): Promise<{ client: Anthropic; model: string }> {
-  const { apiKey, model } = await getAiConfig();
-  if (!apiKey) {
-    throw new Error('No API key set — add your Anthropic API key in Settings → AI.');
-  }
-  return { client: new Anthropic({ apiKey, dangerouslyAllowBrowser: true }), model };
+
+export interface AiCallOpts {
+  system: string;
+  user: string;
+  maxTokens: number;
 }
 
-/** Map SDK errors to messages the review UI can show directly. */
-export function aiErrorMessage(err: unknown): string {
-  if (err instanceof Anthropic.AuthenticationError) {
-    return 'Anthropic rejected the API key — check Settings → AI.';
+async function requireConfig(): Promise<AiConfig> {
+  const cfg = await getAiConfig();
+  if (!aiConfigReady(cfg)) {
+    throw new Error(
+      cfg.provider === 'anthropic'
+        ? 'No Anthropic API key set — add it in Settings → AI.'
+        : 'Set a model name (and an API key, unless the endpoint is keyless like Ollama) in Settings → AI.',
+    );
   }
-  if (err instanceof Anthropic.RateLimitError) {
+  return cfg;
+}
+
+// ---------- Anthropic ----------
+
+function anthropicClient(cfg: AiConfig): Anthropic {
+  return new Anthropic({ apiKey: cfg.anthropic.apiKey!, dangerouslyAllowBrowser: true });
+}
+
+async function anthropicObject<S extends z.ZodType>(
+  cfg: AiConfig,
+  schema: S,
+  opts: AiCallOpts,
+): Promise<z.infer<S>> {
+  const client = anthropicClient(cfg);
+  const response = await client.messages.parse({
+    model: cfg.anthropic.model,
+    max_tokens: opts.maxTokens,
+    system: opts.system,
+    messages: [{ role: 'user', content: opts.user }],
+    output_config: { format: zodOutputFormat(schema) },
+  });
+  if (response.stop_reason === 'refusal') {
+    throw new Error('The model declined this request — try rephrasing it.');
+  }
+  if (!response.parsed_output) {
+    throw new Error('The model returned no usable output — try again.');
+  }
+  return response.parsed_output;
+}
+
+async function anthropicText(cfg: AiConfig, opts: AiCallOpts): Promise<string> {
+  const client = anthropicClient(cfg);
+  const response = await client.messages.create({
+    model: cfg.anthropic.model,
+    max_tokens: opts.maxTokens,
+    system: opts.system,
+    messages: [{ role: 'user', content: opts.user }],
+  });
+  if (response.stop_reason === 'refusal') {
+    throw new Error('The model declined — try again.');
+  }
+  const text = response.content.find((b) => b.type === 'text');
+  return text?.text.trim() ?? '';
+}
+
+// ---------- OpenAI-compatible ----------
+
+function openaiClient(cfg: AiConfig): OpenAI {
+  return new OpenAI({
+    // keyless endpoints (Ollama etc.) still need a non-empty string
+    apiKey: cfg.openai.apiKey ?? 'not-needed',
+    baseURL: cfg.openai.baseUrl,
+    dangerouslyAllowBrowser: true,
+  });
+}
+
+function stripFences(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  return (fenced ? fenced[1] : raw).trim();
+}
+
+async function openaiChat(
+  cfg: AiConfig,
+  messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
+  maxTokens: number,
+  wantJson: boolean,
+): Promise<string> {
+  const client = openaiClient(cfg);
+  // degrade for servers that reject newer params: full → legacy max_tokens → bare
+  const variants: Array<Record<string, unknown>> = [
+    { max_completion_tokens: maxTokens, ...(wantJson ? { response_format: { type: 'json_object' } } : {}) },
+    { max_tokens: maxTokens, ...(wantJson ? { response_format: { type: 'json_object' } } : {}) },
+    { max_tokens: maxTokens },
+  ];
+  let lastErr: unknown;
+  for (const extra of variants) {
+    try {
+      const res = await client.chat.completions.create({
+        model: cfg.openai.model,
+        messages,
+        ...extra,
+      } as never);
+      const choice = (res as OpenAI.ChatCompletion).choices?.[0];
+      if (choice?.message?.refusal) {
+        throw new Error('The model declined this request — try rephrasing it.');
+      }
+      return choice?.message?.content?.trim() ?? '';
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof OpenAI.BadRequestError) continue; // try the next variant
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+async function openaiObject<S extends z.ZodType>(
+  cfg: AiConfig,
+  schema: S,
+  opts: AiCallOpts,
+): Promise<z.infer<S>> {
+  const system = `${opts.system}\nRespond with a SINGLE valid JSON object and nothing else.`;
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: opts.user },
+  ];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const raw = await openaiChat(cfg, messages, opts.maxTokens, true);
+    let parsed: unknown;
+    let problem: string;
+    try {
+      parsed = JSON.parse(stripFences(raw));
+      const result = schema.safeParse(parsed);
+      if (result.success) return result.data;
+      problem = result.error.issues
+        .slice(0, 5)
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+    } catch (err) {
+      problem = `not valid JSON (${(err as Error).message.slice(0, 80)})`;
+    }
+    messages.push(
+      { role: 'assistant', content: raw.slice(0, 4000) },
+      {
+        role: 'user',
+        content: `That reply was invalid: ${problem}. Reply again with ONLY the corrected JSON object.`,
+      },
+    );
+  }
+  throw new Error('The model could not produce valid JSON for this request — try a different model.');
+}
+
+// ---------- Public API ----------
+
+export async function aiGenerateObject<S extends z.ZodType>(
+  schema: S,
+  opts: AiCallOpts,
+): Promise<z.infer<S>> {
+  const cfg = await requireConfig();
+  return cfg.provider === 'anthropic'
+    ? anthropicObject(cfg, schema, opts)
+    : openaiObject(cfg, schema, opts);
+}
+
+export async function aiGenerateText(opts: AiCallOpts): Promise<string> {
+  const cfg = await requireConfig();
+  if (cfg.provider === 'anthropic') return anthropicText(cfg, opts);
+  return openaiChat(
+    cfg,
+    [
+      { role: 'system', content: opts.system },
+      { role: 'user', content: opts.user },
+    ],
+    opts.maxTokens,
+    false,
+  );
+}
+
+/** Map SDK errors (either provider) to messages the UI can show directly. */
+export function aiErrorMessage(err: unknown): string {
+  if (err instanceof Anthropic.AuthenticationError || err instanceof OpenAI.AuthenticationError) {
+    return 'The provider rejected the API key — check Settings → AI.';
+  }
+  if (err instanceof Anthropic.RateLimitError || err instanceof OpenAI.RateLimitError) {
     return 'Rate limited by the API — wait a moment and try again.';
   }
-  if (err instanceof Anthropic.BadRequestError) {
+  if (err instanceof Anthropic.BadRequestError || err instanceof OpenAI.BadRequestError) {
     return `The API rejected the request: ${err.message}`;
   }
-  if (err instanceof Anthropic.APIConnectionError) {
-    return 'Could not reach api.anthropic.com — check your connection.';
+  if (err instanceof OpenAI.NotFoundError) {
+    return 'Model or endpoint not found — check the model name and base URL in Settings → AI.';
   }
-  if (err instanceof Anthropic.APIError) {
-    return `API error ${err.status}: ${err.message}`;
+  if (err instanceof Anthropic.APIConnectionError || err instanceof OpenAI.APIConnectionError) {
+    return 'Could not reach the API endpoint — check your connection (and base URL/CORS for custom endpoints).';
+  }
+  if (err instanceof Anthropic.APIError || err instanceof OpenAI.APIError) {
+    return `API error ${(err as { status?: number }).status}: ${(err as Error).message}`;
   }
   return (err as Error).message || 'Unknown error';
 }
 
 /** Cheap connectivity/key check for the Settings panel. */
 export async function testConnection(): Promise<string> {
-  const { client, model } = await makeClient();
-  const response = await client.messages.create({
-    model,
-    // adaptive thinking may spend some of the budget; keep headroom
-    max_tokens: 256,
-    messages: [{ role: 'user', content: 'Reply with the single word: ok' }],
+  const cfg = await requireConfig();
+  const reply = await aiGenerateText({
+    system: 'You are a connectivity check.',
+    user: 'Reply with the single word: ok',
+    maxTokens: 256,
   });
-  const text = response.content.find((b) => b.type === 'text');
-  return `Connected — ${model} answered${text ? ` “${text.text.trim().slice(0, 40)}”` : ''}.`;
+  const model = cfg.provider === 'anthropic' ? cfg.anthropic.model : cfg.openai.model;
+  return `Connected — ${model} answered${reply ? ` “${reply.slice(0, 40)}”` : ''}.`;
 }

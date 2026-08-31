@@ -172,6 +172,29 @@ describe('applyPacket add-items', () => {
   });
 });
 
+describe('sentence-cloze course round trip', () => {
+  it('export preserves the clozeSentences kind so re-import stays a cloze course', async () => {
+    const { clozeSeed } = await import('@/db/seed/cloze');
+    const courseId = await installSeed(clozeSeed, NOW);
+    const pkg = await exportCoursePackage(courseId);
+    expect(pkg.itemTypes[0].fields.find((f) => f.name === 'Sentences')?.kind).toBe(
+      'clozeSentences',
+    );
+
+    pkg.course.name = 'Cloze Copy';
+    const res = await applyPacket(parsePacket(pkg), NOW + 1000);
+    const types = await db.itemTypes.where('courseId').equals(res.courseId).toArray();
+    const tpl = types[0].templates.find((t) => t.name === 'Cloze')!;
+    expect(tpl.grading.mode).toBe('sentenceCloze');
+    if (tpl.grading.mode === 'sentenceCloze') {
+      const sentencesField = types[0].fields.find((f) => f.name === 'Sentences')!;
+      expect(tpl.grading.sentencesFieldId).toBe(sentencesField.id);
+    }
+    const items = await db.items.where('courseId').equals(res.courseId).toArray();
+    expect(items.length).toBe(clozeSeed.items.length);
+  });
+});
+
 describe('export → import round trip', () => {
   it('re-importing an exported package reproduces content', async () => {
     const first = await applyPacket(parsePacket(validCreate), NOW);

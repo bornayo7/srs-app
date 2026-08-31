@@ -2,9 +2,10 @@ import { db } from '../db';
 import { createCourse } from '../repo/courses';
 import { createItem } from '../repo/items';
 import { createItemType, type SimpleTypeSpec } from '../repo/itemTypes';
+import type { ClozeSentence, FieldValue } from '@/engine/types';
 
 export interface SeedItem {
-  fields: Record<string, string>; // field NAME → value
+  fields: Record<string, string | ClozeSentence[]>; // field NAME → value
   synonyms?: Record<string, string[]>; // template NAME → synonyms
   note?: string;
 }
@@ -54,7 +55,7 @@ async function installSeedInner(seed: SeedCourse, now: number): Promise<string> 
 
   let itemStamp = now; // strictly increasing so the lesson queue follows authored order
   for (const si of seed.items) {
-    const fieldValues: Record<string, string> = {};
+    const fieldValues: Record<string, FieldValue> = {};
     for (const [name, value] of Object.entries(si.fields)) {
       const id = fieldIdByName.get(name);
       if (id) fieldValues[id] = value;

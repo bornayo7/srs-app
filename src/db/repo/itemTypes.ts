@@ -32,14 +32,23 @@ export async function createItemType(
     color: spec.color,
     icon: spec.icon,
     fields,
-    templates: spec.templates.map((t) => ({
-      id: newId(),
-      name: t.name,
-      promptFieldIds: t.promptFieldNames.map((n) => byName.get(n)!),
-      answerFieldId: byName.get(t.answerFieldName)!,
-      hintFieldIds: [],
-      grading: t.grading,
-    })),
+    templates: spec.templates.map((t) => {
+      const answerFieldId = byName.get(t.answerFieldName)!;
+      // sentence-cloze specs reference their sentences field by ANSWER name —
+      // resolve the real field id here, once ids exist
+      const grading =
+        t.grading.mode === 'sentenceCloze'
+          ? { ...t.grading, sentencesFieldId: answerFieldId }
+          : t.grading;
+      return {
+        id: newId(),
+        name: t.name,
+        promptFieldIds: t.promptFieldNames.map((n) => byName.get(n)!),
+        answerFieldId,
+        hintFieldIds: [],
+        grading,
+      };
+    }),
     updatedAt: now,
   };
   await db.itemTypes.add(itemType);
