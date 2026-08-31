@@ -69,6 +69,9 @@ export function SessionSummary({
   const correct = completed.filter((c) => c.incorrectCount === 0);
   const missed = completed.filter((c) => c.incorrectCount > 0);
   const pct = completed.length === 0 ? 100 : Math.round((correct.length / completed.length) * 100);
+  const passedCount = completed.filter((c) => c.itemPassed).length;
+  const unlockedCount = completed.reduce((n, c) => n + c.unlockedCount, 0);
+  const newLevel = completed.reduce<number | null>((lv, c) => c.leveledUpTo ?? lv, null);
 
   return (
     <div className="space-y-6">
@@ -78,6 +81,29 @@ export function SessionSummary({
           {correct.length} correct · {missed.length} missed · {completed.length} cards
         </div>
       </div>
+
+      {newLevel !== null && (
+        <div className="rounded-2xl border border-violet-700 bg-violet-950/40 p-5 text-center">
+          <div className="text-3xl">🎉</div>
+          <div className="mt-1 text-lg font-semibold text-violet-100">Level {newLevel}!</div>
+          <p className="text-sm text-violet-300/80">New content just unlocked — go do its lessons.</p>
+        </div>
+      )}
+
+      {(passedCount > 0 || unlockedCount > 0) && (
+        <div className="flex flex-wrap justify-center gap-2 text-sm">
+          {passedCount > 0 && (
+            <Badge color="violet">
+              ✅ {passedCount} item{passedCount === 1 ? '' : 's'} passed
+            </Badge>
+          )}
+          {unlockedCount > 0 && (
+            <Badge color="emerald">
+              🔓 {unlockedCount} item{unlockedCount === 1 ? '' : 's'} unlocked
+            </Badge>
+          )}
+        </div>
+      )}
 
       {missed.length > 0 && (
         <div>

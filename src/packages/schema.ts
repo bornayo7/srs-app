@@ -24,6 +24,13 @@ const fieldValue = z.union([z.string(), z.array(z.string()), z.array(clozeSenten
 export const packetItemSchema = z.object({
   /** ItemType NAME; may be omitted when the course has exactly one type. */
   type: z.string().optional(),
+  /** Local handle other items in this packet can list as a prerequisite. */
+  key: z.string().min(1).optional(),
+  /**
+   * Prerequisites: `key`s of earlier items in this packet (or existing item
+   * ids). The item stays locked until all of them reach the pass stage.
+   */
+  prereqs: z.array(z.string()).optional(),
   /** Field NAME → value. */
   fields: z.record(z.string(), fieldValue),
   /**
@@ -80,6 +87,11 @@ export const createCoursePacketSchema = z.object({
     ladderPreset: z.enum(['classic', 'gentle', 'bunpro']).optional(),
     newPerDay: z.number().int().min(0).optional(),
     batchSize: z.number().int().min(1).optional(),
+    /** 'levels' gates content behind level-ups; default 'flat'. */
+    levelMode: z.enum(['flat', 'levels']).optional(),
+    /** Item type NAMES whose passing drives level-ups (default: all types). */
+    gateTypes: z.array(z.string()).optional(),
+    passPercent: z.number().int().min(1).max(100).optional(),
   }),
   itemTypes: z.array(packetItemTypeSchema).min(1),
   items: z.array(packetItemSchema),
@@ -103,7 +115,47 @@ export type AddItemsPacket = z.infer<typeof addItemsPacketSchema>;
 export const packetSchema = z
   .discriminatedUnion('kind', [createCoursePacketSchema, addItemsPacketSchema])
   .superRefine((packet, ctx) => {
+    // Prereq handles: unique, and referenced only after they're defined.
+    // "Earlier in the array" is required (and makes cycles impossible) —
+    // author content in dependency order: radicals, then kanji, then vocab.
+    const seenKeys = new Set<string>();
+    for (const [i, item] of packet.items.entries()) {
+      for (const ref of item.prereqs ?? []) {
+        // add-items packets may also reference existing item ids — those are
+        // resolved (and validated) at import time against the target course
+        if (!seenKeys.has(ref) && packet.kind === 'create-course') {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['items', i, 'prereqs'],
+            message: `unknown prerequisite "${ref}" — reference the "key" of an item defined earlier in this packet`,
+          });
+        }
+      }
+      if (item.key) {
+        if (seenKeys.has(item.key)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['items', i, 'key'],
+            message: `duplicate item key "${item.key}"`,
+          });
+        }
+        seenKeys.add(item.key);
+      }
+    }
+
     if (packet.kind !== 'create-course') return;
+
+    const typeNames = new Set(packet.itemTypes.map((t) => t.name.toLowerCase()));
+    for (const gate of packet.course.gateTypes ?? []) {
+      if (!typeNames.has(gate.toLowerCase())) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['course', 'gateTypes'],
+          message: `gateTypes references unknown item type "${gate}"`,
+        });
+      }
+    }
+
     const dupType = findDuplicate(packet.itemTypes.map((t) => t.name));
     if (dupType) {
       ctx.addIssue({

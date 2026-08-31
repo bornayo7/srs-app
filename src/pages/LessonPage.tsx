@@ -4,7 +4,12 @@ import { db } from '@/db/db';
 import type { Item, ItemType } from '@/engine/types';
 import { matchTypedAnswer } from '@/engine/grading/match';
 import { isClozeSentences, revealBlank } from '@/engine/grading/cloze';
-import { entryMatchContext, withClozePick, type SessionEntry } from '@/stores/sessionStore';
+import {
+  entryAnswerLang,
+  entryMatchContext,
+  withClozePick,
+  type SessionEntry,
+} from '@/stores/sessionStore';
 import { seededShuffle, mulberry32 } from '@/engine/queue';
 import { newId } from '@/engine/ids';
 import { completeLessonBatch, lessonAvailability, nextLessonBatch } from '@/services/lessons';
@@ -273,7 +278,9 @@ export default function LessonPage() {
       <CardPrompt key={entry.card.id} entry={entry} feedback={feedback} />
       <div className="mt-5">
         <TypedInput
+          key={entry.card.id}
           feedback={feedback}
+          answerLang={entryAnswerLang(entry)}
           onSubmit={(text) => {
             const ctx = entryMatchContext(entry);
             const v = matchTypedAnswer(text, ctx);
