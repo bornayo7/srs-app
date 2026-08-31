@@ -1,17 +1,16 @@
 import { z } from 'zod';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { db } from '@/db/db';
 import { itemPreview } from '@/engine/grading/context';
 import type { ItemType } from '@/engine/types';
 import { PACKET_FORMAT, PACKET_VERSION, parsePacket } from '@/packages/schema';
 import type { AddItemsPacket, CreateCoursePacket, PacketItem } from '@/packages/schema';
-import { makeClient } from './client';
+import { aiGenerateObject, aiGenerateText } from './client';
 
 /**
- * AI generation targets a strict schema via structured outputs
- * (client.messages.parse + zodOutputFormat), then converts into the same
- * srs-packet shape the Inbox/MCP pipeline imports. Structured-output schemas
- * avoid records and optionals: every field required, name/value pair arrays.
+ * AI generation targets a strict zod schema (provider-agnostic — Anthropic
+ * structured outputs, or JSON mode + validation on OpenAI-compatible APIs),
+ * then converts into the same srs-packet shape the Inbox/MCP pipeline imports.
+ * Schemas avoid records and optionals: every field required, name/value pairs.
  */
 
 const generatedItem = z.object({
@@ -139,25 +138,12 @@ ${ANSWER_RULES}
 Each item's "fields" array must contain one entry per field of the item type, using the EXACT field names given above.
 ${existingPreviews.length > 0 ? `The course already contains these items — do NOT duplicate them:\n${existingPreviews.join(' | ')}` : ''}`;
 
-  const { client, model } = await makeClient();
-  const response = await client.messages.parse({
-    model,
-    max_tokens: 16000,
+  const parsed = await aiGenerateObject(generatedItemsSchema, {
     system,
-    messages: [
-      {
-        role: 'user',
-        content: `Generate exactly ${count} items for: ${request}`,
-      },
-    ],
-    output_config: { format: zodOutputFormat(generatedItemsSchema) },
+    user: `Generate exactly ${count} items for: ${request}`,
+    maxTokens: 16000,
   });
-
-  if (response.stop_reason === 'refusal') {
-    throw new Error('The model declined this request — try rephrasing it.');
-  }
-  const parsed = response.parsed_output;
-  if (!parsed || parsed.items.length === 0) {
+  if (parsed.items.length === 0) {
     throw new Error('The model returned no usable items — try rephrasing the request.');
   }
 
@@ -189,25 +175,11 @@ Design the smallest schema that fits the subject (e.g. language vocab: fields Wo
 Template "promptFields" and "answerField" must use the EXACT field names you define. The answer field of every template must hold short typeable text.
 ${ANSWER_RULES}`;
 
-  const { client, model } = await makeClient();
-  const response = await client.messages.parse({
-    model,
-    max_tokens: 32000,
+  const parsed = await aiGenerateObject(generatedCourseSchema, {
     system,
-    messages: [
-      {
-        role: 'user',
-        content: `Design a course with exactly ${count} items for: ${request}`,
-      },
-    ],
-    output_config: { format: zodOutputFormat(generatedCourseSchema) },
+    user: `Design a course with exactly ${count} items for: ${request}`,
+    maxTokens: 32000,
   });
-
-  if (response.stop_reason === 'refusal') {
-    throw new Error('The model declined this request — try rephrasing it.');
-  }
-  const parsed = response.parsed_output;
-  if (!parsed) throw new Error('The model returned no usable course — try again.');
 
   const templatesByAnswerField = new Map<string, string[]>();
   for (const tpl of parsed.itemType.templates) {
@@ -258,20 +230,12 @@ export async function generateMnemonic(itemId: string): Promise<string> {
     .filter(Boolean)
     .join('\n');
 
-  const { client, model } = await makeClient();
-  const response = await client.messages.create({
-    model,
-    max_tokens: 4000,
+  const mnemonic = await aiGenerateText({
     system:
       'You write mnemonics for spaced-repetition flashcards. Reply with ONLY the mnemonic: 1-2 vivid, concrete sentences that link the prompt to the answer. No preamble, no quotes.',
-    messages: [{ role: 'user', content: `Write a mnemonic for this item:\n${fieldLines}` }],
+    user: `Write a mnemonic for this item:\n${fieldLines}`,
+    maxTokens: 4000,
   });
-
-  if (response.stop_reason === 'refusal') {
-    throw new Error('The model declined — try again.');
-  }
-  const text = response.content.find((b) => b.type === 'text');
-  const mnemonic = text?.text.trim() ?? '';
   if (!mnemonic) throw new Error('No mnemonic returned — try again.');
   return mnemonic;
 }

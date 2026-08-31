@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 import type {
+  Capture,
   Card,
   Course,
   Item,
@@ -20,6 +21,7 @@ export class SrsDB extends Dexie {
   reviewLogs!: Table<ReviewLog, string>;
   media!: Table<MediaAsset, string>;
   meta!: Table<MetaRow, string>;
+  captures!: Table<Capture, string>;
 
   constructor(name = 'srs-app') {
     super(name);
@@ -32,6 +34,10 @@ export class SrsDB extends Dexie {
       reviewLogs: 'id, cardId, ts, [courseId+ts], [sessionId+ts]',
       media: 'id',
       meta: 'key',
+    });
+    // v2: quick-capture inbox (additive — never edit past versions)
+    this.version(2).stores({
+      captures: 'id, createdAt',
     });
   }
 }

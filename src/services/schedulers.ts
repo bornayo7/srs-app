@@ -14,3 +14,10 @@ export async function schedulerForCourse(
   }
   throw new Error('FSRS scheduling arrives in Phase 5');
 }
+
+/** Ghost cards always run on the fixed short drill ladder, whatever the course uses. */
+export async function ghostScheduler(): Promise<{ scheduler: Scheduler; ladder: SrsLadder }> {
+  const ladder = await db.ladders.get('preset-ghost');
+  if (!ladder) throw new Error('ghost ladder preset missing — restart the app');
+  return { scheduler: makeLadderScheduler(ladder), ladder };
+}

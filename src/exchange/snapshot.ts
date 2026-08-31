@@ -2,6 +2,7 @@ import Dexie from 'dexie';
 import { db } from '@/db/db';
 import { startOfLocalDay } from '@/engine/time';
 import { itemPreview } from '@/engine/grading/context';
+import { clozeSummary, isClozeSentences } from '@/engine/grading/cloze';
 import type { Card, Item, ItemType } from '@/engine/types';
 
 /**
@@ -37,10 +38,12 @@ export async function buildSnapshot(now: number): Promise<Record<string, unknown
       .where('[courseId+state]')
       .between([course.id, Dexie.minKey], [course.id, Dexie.maxKey])
       .toArray();
-    const reviewCards = allCards.filter((c) => c.state === 'review');
-    const burned = allCards.filter((c) => c.state === 'burned').length;
+    // ghosts are drill copies — exclude them from item stats and counts
+    const realCards = allCards.filter((c) => !c.isGhost);
+    const reviewCards = realCards.filter((c) => c.state === 'review');
+    const burned = realCards.filter((c) => c.state === 'burned').length;
     const cardsByItem = new Map<string, Card[]>();
-    for (const c of allCards) {
+    for (const c of realCards) {
       const arr = cardsByItem.get(c.itemId) ?? [];
       arr.push(c);
       cardsByItem.set(c.itemId, arr);
@@ -55,7 +58,13 @@ export async function buildSnapshot(now: number): Promise<Record<string, unknown
       const fields: Record<string, string> = {};
       for (const f of itemType.fields) {
         const v = item.fieldValues[f.id];
-        const text = typeof v === 'string' ? v : Array.isArray(v) ? v.join(', ') : '';
+        const text = isClozeSentences(v)
+          ? clozeSummary(v)
+          : typeof v === 'string'
+            ? v
+            : Array.isArray(v)
+              ? (v as string[]).join(', ')
+              : '';
         if (text) fields[f.name] = text.slice(0, 200);
       }
       const itemCards = cardsByItem.get(item.id) ?? [];

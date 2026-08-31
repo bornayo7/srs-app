@@ -37,8 +37,20 @@ claude mcp add srs -- npx tsx "C:\Users\yashb\Desktop\Github\srs-app\srs-mcp\ind
 }
 ```
 
-Other MCP clients (ChatGPT desktop, Hermes, …): any client that supports **stdio** servers works
-with the same command. Set the `SRS_EXCHANGE` environment variable to use a folder other than
+### OpenAI Codex CLI (use your ChatGPT subscription)
+
+OpenAI's subscription sign-in can't be used by third-party apps directly — but Codex can drive
+this server, so your ChatGPT plan can still build decks:
+
+```bash
+codex mcp add srs -- npx tsx "C:\Users\yashb\Desktop\Github\srs-app\srs-mcp\index.ts"
+```
+
+Then ask Codex e.g. *"use the srs tools to make me a 30-item Spanish verbs deck"* and import it
+from the app's Inbox.
+
+Other MCP clients (Hermes, etc.): any client that supports **stdio** servers works with the same
+command. Set the `SRS_EXCHANGE` environment variable to use a folder other than
 `~/srs-exchange`.
 
 ## Tools

@@ -93,7 +93,7 @@ export default function ReviewPage() {
         <div className="h-full bg-violet-500 transition-all" style={{ width: `${progress}%` }} />
       </div>
 
-      <CardPrompt entry={entry} feedback={s.feedback} />
+      <CardPrompt key={entry.card.id} entry={entry} feedback={s.feedback} />
       <div className="mt-5">
         {/* key remounts (and clears) the input whenever the front card changes,
             including undo-after-advance restoring a different card */}

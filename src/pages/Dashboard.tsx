@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '@/db/db';
+import { newId } from '@/engine/ids';
 import { Badge, Button, Panel, TextInput } from '@/components/ui';
 import {
   useAllScheduledCards,
@@ -17,6 +19,7 @@ import { basicTypeSpec, createItemType } from '@/db/repo/itemTypes';
 import { installSeed, isSeedInstalled } from '@/db/seed';
 import { gentleSeed } from '@/db/seed/gentle';
 import { techSeed } from '@/db/seed/tech';
+import { clozeSeed } from '@/db/seed/cloze';
 import { GenerateCoursePanel } from '@/components/ai/GenerateCoursePanel';
 import type { Course } from '@/engine/types';
 
@@ -134,10 +137,46 @@ function NewCourseForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function QuickCapture() {
+  const [text, setText] = useState('');
+  const pending = useLiveQuery(() => db.captures.count(), []);
+  const add = async () => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    await db.captures.add({ id: newId(), text: trimmed, createdAt: now() });
+    setText('');
+  };
+  return (
+    <Panel title="Quick capture">
+      <div className="flex items-center gap-2">
+        <TextInput
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void add();
+            }
+          }}
+          placeholder="Jot something to remember — Dr. Chen = the cardiologist from the party"
+        />
+        <Button variant="primary" disabled={!text.trim()} onClick={() => void add()}>
+          Capture
+        </Button>
+        {(pending ?? 0) > 0 && (
+          <Link to="/inbox" className="shrink-0 text-xs text-violet-300 hover:underline">
+            {pending} to sort →
+          </Link>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function SeedOffers() {
   const t = useNowTick(60_000);
   const missing = useLiveQuery(async () => {
-    const seeds = [gentleSeed, techSeed];
+    const seeds = [gentleSeed, techSeed, clozeSeed];
     const flags = await Promise.all(seeds.map(isSeedInstalled));
     return seeds.filter((_, i) => !flags[i]);
   }, []);
@@ -208,6 +247,7 @@ export default function Dashboard() {
         </div>
       )}
 
+      <QuickCapture />
       <ForecastStrip t={t} />
       <SeedOffers />
     </div>

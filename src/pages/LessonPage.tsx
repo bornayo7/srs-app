@@ -1,30 +1,33 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { db } from '@/db/db';
-import type { Card, Item, ItemType } from '@/engine/types';
+import type { Item, ItemType } from '@/engine/types';
 import { matchTypedAnswer } from '@/engine/grading/match';
-import { buildMatchContext } from '@/engine/grading/context';
+import { isClozeSentences, revealBlank } from '@/engine/grading/cloze';
+import { entryMatchContext, withClozePick, type SessionEntry } from '@/stores/sessionStore';
 import { seededShuffle, mulberry32 } from '@/engine/queue';
 import { newId } from '@/engine/ids';
 import { completeLessonBatch, lessonAvailability, nextLessonBatch } from '@/services/lessons';
 import { now } from '@/services/clock';
 import { requestPersistentStorage } from '@/db/db';
 import { maybeRefreshSnapshot } from '@/exchange/exchange';
+import { speak, stopSpeaking, ttsSupported } from '@/services/tts';
 import { Button, Badge } from '@/components/ui';
 import { TypedInput } from '@/components/review/TypedInput';
+import { CardPrompt } from '@/components/review/CardPrompt';
 import type { Feedback } from '@/stores/sessionStore';
-
-interface QuizEntry {
-  card: Card;
-  item: Item;
-  itemType: ItemType;
-}
 
 type Phase =
   | { kind: 'loading' }
   | { kind: 'none' }
   | { kind: 'study'; items: Item[]; types: Map<string, ItemType>; index: number }
-  | { kind: 'quiz'; items: Item[]; types: Map<string, ItemType>; queue: QuizEntry[]; total: number }
+  | {
+      kind: 'quiz';
+      items: Item[];
+      types: Map<string, ItemType>;
+      queue: SessionEntry[];
+      total: number;
+    }
   | { kind: 'batchDone'; remaining: number };
 
 /**
@@ -61,16 +64,24 @@ export default function LessonPage() {
     void loadBatch();
   }, [loadBatch]);
 
+  // stop any in-flight speech when leaving the lesson flow
+  useEffect(() => stopSpeaking, []);
+
   async function startQuiz(items: Item[], types: Map<string, ItemType>) {
-    const entries: QuizEntry[] = [];
+    const seed = Date.now() & 0x7fffffff;
+    const entries: SessionEntry[] = [];
     for (const item of items) {
       const itemType = types.get(item.typeId);
       if (!itemType) continue;
       const cards = await db.cards.where('itemId').equals(item.id).toArray();
       for (const card of cards) {
         // skip cards whose template no longer exists on the type
-        const hasTemplate = itemType.templates.some((t) => t.id === card.templateId);
-        if (card.state === 'new' && hasTemplate) entries.push({ card, item, itemType });
+        const template = itemType.templates.find((t) => t.id === card.templateId);
+        if (card.state === 'new' && template) {
+          entries.push(
+            withClozePick({ card, item, itemType, template }, seed + entries.length),
+          );
+        }
       }
     }
     if (entries.length === 0) {
@@ -164,6 +175,36 @@ export default function LessonPage() {
           <div className="space-y-4 px-6 py-6">
             {itemType.fields.map((f) => {
               const v = item.fieldValues[f.id];
+              if (isClozeSentences(v)) {
+                return (
+                  <div key={f.id}>
+                    <div className="text-[10px] uppercase tracking-widest text-slate-500">
+                      {f.name}
+                    </div>
+                    <ul className="mt-1 space-y-1.5">
+                      {v.map((s, i) => (
+                        <li key={i} className="text-base text-slate-100">
+                          {revealBlank(s.text)}
+                          {s.translation && (
+                            <span className="ml-2 text-sm italic text-slate-500">
+                              {s.translation}
+                            </span>
+                          )}
+                          {ttsSupported() && (
+                            <button
+                              className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-xs hover:bg-slate-700"
+                              title="Read aloud"
+                              onClick={() => speak(revealBlank(s.text))}
+                            >
+                              🔊
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              }
               const text =
                 typeof v === 'string' ? v : Array.isArray(v) ? (v as string[]).join(', ') : '';
               if (!text) return null;
@@ -172,7 +213,18 @@ export default function LessonPage() {
                   <div className="text-[10px] uppercase tracking-widest text-slate-500">
                     {f.name}
                   </div>
-                  <div className="text-2xl font-semibold text-slate-50">{text}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-2xl font-semibold text-slate-50">{text}</div>
+                    {ttsSupported() && (
+                      <button
+                        className="rounded bg-slate-800 px-1.5 py-0.5 text-xs hover:bg-slate-700"
+                        title="Read aloud"
+                        onClick={() => speak(text)}
+                      >
+                        🔊
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -208,15 +260,7 @@ export default function LessonPage() {
   // quiz
   const entry = phase.queue[0];
   if (!entry) return null;
-  const itemType = entry.itemType;
-  const template = itemType.templates.find((t) => t.id === entry.card.templateId)!;
   const done = phase.total - phase.queue.length;
-  const prompts = template.promptFieldIds
-    .map((id) => {
-      const v = entry.item.fieldValues[id];
-      return typeof v === 'string' ? v : Array.isArray(v) ? (v as string[]).join(', ') : '';
-    })
-    .filter(Boolean);
 
   return (
     <div className="mx-auto max-w-xl">
@@ -226,33 +270,12 @@ export default function LessonPage() {
         </span>
         <Badge color="amber">lesson quiz — no SRS effect</Badge>
       </div>
-      <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-xl">
-        <div
-          className="flex items-center justify-between px-4 py-2 text-sm font-semibold text-white/95"
-          style={{ backgroundColor: itemType.color }}
-        >
-          <span>
-            {itemType.icon} {itemType.name}
-          </span>
-          <span className="rounded bg-black/25 px-2 py-0.5 text-xs uppercase tracking-widest">
-            {template.name}
-          </span>
-        </div>
-        <div className="flex min-h-36 items-center justify-center px-6 py-8 text-center text-3xl font-semibold text-slate-50">
-          {prompts.join(' · ')}
-        </div>
-        {feedback?.kind === 'incorrect' && (
-          <div className="border-t border-rose-900/60 bg-rose-950/30 px-6 py-3 text-center text-sm text-rose-200">
-            Answer: <span className="font-semibold">{feedback.accepted[0]}</span> — it'll come
-            around again.
-          </div>
-        )}
-      </div>
+      <CardPrompt key={entry.card.id} entry={entry} feedback={feedback} />
       <div className="mt-5">
         <TypedInput
           feedback={feedback}
           onSubmit={(text) => {
-            const ctx = buildMatchContext(entry.item, itemType, template);
+            const ctx = entryMatchContext(entry);
             const v = matchTypedAnswer(text, ctx);
             if (v.verdict === 'retry') {
               setFeedback({ kind: 'retry', reason: v.reason, message: v.message, nonce: Date.now() });

@@ -2,6 +2,7 @@ import { db } from '@/db/db';
 import { createCourse } from '@/db/repo/courses';
 import { createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
 import { createItem, type CreateItemInput } from '@/db/repo/items';
+import { extractBlank, isClozeSentences } from '@/engine/grading/cloze';
 import type { Course, FieldValue, ItemType } from '@/engine/types';
 import type { CreateCoursePacket, AddItemsPacket, Packet, PacketItem } from './schema';
 
@@ -40,13 +41,21 @@ function resolveItem(
 
   for (const tpl of itemType.templates) {
     const answer = fieldValues[tpl.answerFieldId];
+    const answerName = itemType.fields.find((f) => f.id === tpl.answerFieldId)?.name;
+    if (tpl.grading.mode === 'sentenceCloze') {
+      if (!isClozeSentences(answer) || !answer.some((s) => extractBlank(s) !== null)) {
+        throw new Error(
+          `Item ${index + 1}: "${answerName}" needs at least one sentence with a ⟦blank⟧ (template "${tpl.name}")`,
+        );
+      }
+      continue;
+    }
     // arrays must contain actual content — [""] is not an answer
     const present =
       typeof answer === 'string'
         ? answer.trim().length > 0
         : (answer ?? []).some((v) => typeof v === 'string' && v.trim().length > 0);
     if (!present) {
-      const answerName = itemType.fields.find((f) => f.id === tpl.answerFieldId)?.name;
       throw new Error(
         `Item ${index + 1}: missing answer field "${answerName}" (needed by template "${tpl.name}")`,
       );
@@ -146,15 +155,22 @@ async function applyCreateCourse(packet: CreateCoursePacket, now: number): Promi
               }
               return name;
             };
+            const answerFieldName = resolve(t.answerField);
+            const answerKind = typeSpec.fields.find((f) => f.name === answerFieldName)?.kind;
             return {
               name: t.name,
               promptFieldNames: t.promptFields.map(resolve),
-              answerFieldName: resolve(t.answerField),
-              grading: {
-                mode: 'typed' as const,
-                answerLang: t.answerLang ?? 'latin',
-                typoTolerance: t.typoTolerance ?? true,
-              },
+              answerFieldName,
+              grading:
+                answerKind === 'clozeSentences'
+                  ? // answering INTO sentences = sentence-cloze; the field id is
+                    // resolved by createItemType
+                    { mode: 'sentenceCloze' as const, sentencesFieldId: '', rotation: 'random' as const }
+                  : {
+                      mode: 'typed' as const,
+                      answerLang: t.answerLang ?? 'latin',
+                      typoTolerance: t.typoTolerance ?? true,
+                    },
             };
           }),
         };

@@ -5,55 +5,115 @@ import { exportAll, downloadBackup } from '@/db/export';
 import { importAll } from '@/db/import';
 import { clockOffset, now, setClockOffset } from '@/services/clock';
 import { DAY, HOUR, formatDuration } from '@/engine/time';
-import { AI_MODELS, getAiConfig, setApiKey, setModel } from '@/ai/config';
+import {
+  ANTHROPIC_MODELS,
+  OPENAI_COMPAT_PRESETS,
+  getAiConfig,
+  setAnthropicKey,
+  setAnthropicModel,
+  setOpenaiBaseUrl,
+  setOpenaiKey,
+  setOpenaiModel,
+  setProvider,
+  type AiProvider,
+} from '@/ai/config';
 import { aiErrorMessage, testConnection } from '@/ai/client';
 
 function AiPanel() {
+  const [provider, setProviderState] = useState<AiProvider>('anthropic');
   const [key, setKey] = useState('');
-  const [hasKey, setHasKey] = useState(false);
-  const [model, setModelState] = useState('claude-opus-5');
+  const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
+  const [hasOpenaiKey, setHasOpenaiKey] = useState(false);
+  const [anthropicModel, setAnthropicModelState] = useState('claude-opus-5');
+  const [openaiBaseUrl, setOpenaiBaseUrlState] = useState('https://api.openai.com/v1');
+  const [openaiModel, setOpenaiModelState] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     void getAiConfig().then((cfg) => {
-      setHasKey(cfg.apiKey !== null);
-      setModelState(cfg.model);
+      setProviderState(cfg.provider);
+      setHasAnthropicKey(cfg.anthropic.apiKey !== null);
+      setHasOpenaiKey(cfg.openai.apiKey !== null);
+      setAnthropicModelState(cfg.anthropic.model);
+      setOpenaiBaseUrlState(cfg.openai.baseUrl);
+      setOpenaiModelState(cfg.openai.model);
     });
   }, []);
 
+  const hasActiveKey = provider === 'anthropic' ? hasAnthropicKey : hasOpenaiKey;
+
   return (
-    <Panel title="AI (Anthropic API)">
+    <Panel title="AI provider">
       <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {(
+            [
+              ['anthropic', 'Anthropic (Claude)'],
+              ['openai', 'OpenAI-compatible (OpenAI · Gemini · OpenRouter · Ollama…)'],
+            ] as const
+          ).map(([id, label]) => (
+            <label key={id} className="flex items-center gap-1.5 text-sm text-slate-200">
+              <input
+                type="radio"
+                name="ai-provider"
+                checked={provider === id}
+                onChange={async () => {
+                  setProviderState(id);
+                  await setProvider(id);
+                  setStatus('');
+                }}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+
         <div className="flex flex-wrap items-end gap-2">
-          <label className="block grow max-w-md">
+          <label className="block max-w-md grow">
             <span className="mb-1 block text-xs text-slate-400">
-              API key {hasKey && <Badge color="emerald">saved</Badge>}
+              API key {hasActiveKey && <Badge color="emerald">saved</Badge>}
             </span>
             <TextInput
               type="password"
               value={key}
               onChange={(e) => setKey(e.target.value)}
-              placeholder={hasKey ? '•••••••• (saved — paste to replace)' : 'sk-ant-…'}
+              placeholder={
+                hasActiveKey
+                  ? '•••••••• (saved — paste to replace)'
+                  : provider === 'anthropic'
+                    ? 'sk-ant-…'
+                    : 'sk-… (or the key your provider issues)'
+              }
             />
           </label>
           <Button
             variant="primary"
             disabled={!key.trim()}
             onClick={async () => {
-              await setApiKey(key);
+              if (provider === 'anthropic') {
+                await setAnthropicKey(key);
+                setHasAnthropicKey(true);
+              } else {
+                await setOpenaiKey(key);
+                setHasOpenaiKey(true);
+              }
               setKey('');
-              setHasKey(true);
               setStatus('Key saved locally.');
             }}
           >
             Save key
           </Button>
-          {hasKey && (
+          {hasActiveKey && (
             <Button
               onClick={async () => {
-                await setApiKey('');
-                setHasKey(false);
+                if (provider === 'anthropic') {
+                  await setAnthropicKey('');
+                  setHasAnthropicKey(false);
+                } else {
+                  await setOpenaiKey('');
+                  setHasOpenaiKey(false);
+                }
                 setStatus('Key removed.');
               }}
             >
@@ -61,27 +121,67 @@ function AiPanel() {
             </Button>
           )}
         </div>
+
+        {provider === 'anthropic' ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={anthropicModel}
+              onChange={async (e) => {
+                setAnthropicModelState(e.target.value);
+                await setAnthropicModel(e.target.value);
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
+            >
+              {ANTHROPIC_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="block max-w-sm grow">
+              <span className="mb-1 block text-xs text-slate-400">Base URL</span>
+              <TextInput
+                value={openaiBaseUrl}
+                onChange={(e) => setOpenaiBaseUrlState(e.target.value)}
+                onBlur={() => void setOpenaiBaseUrl(openaiBaseUrl)}
+                list="openai-base-urls"
+              />
+              <datalist id="openai-base-urls">
+                {OPENAI_COMPAT_PRESETS.map((p) => (
+                  <option key={p.baseUrl} value={p.baseUrl}>
+                    {p.label}
+                  </option>
+                ))}
+              </datalist>
+            </label>
+            <label className="block max-w-52">
+              <span className="mb-1 block text-xs text-slate-400">Model name</span>
+              <TextInput
+                value={openaiModel}
+                onChange={(e) => setOpenaiModelState(e.target.value)}
+                onBlur={() => void setOpenaiModel(openaiModel)}
+                placeholder="e.g. gpt-5.1 / gemini-2.5-flash"
+              />
+            </label>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={model}
-            onChange={async (e) => {
-              setModelState(e.target.value);
-              await setModel(e.target.value);
-            }}
-            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
-          >
-            {AI_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
           <Button
-            disabled={!hasKey || busy}
+            disabled={
+              busy || (provider === 'anthropic' ? !hasActiveKey : !openaiModel.trim())
+            }
             onClick={async () => {
               setBusy(true);
               setStatus('Testing…');
               try {
+                if (provider === 'openai') {
+                  await setOpenaiBaseUrl(openaiBaseUrl);
+                  await setOpenaiModel(openaiModel);
+                }
                 setStatus(await testConnection());
               } catch (err) {
                 setStatus(aiErrorMessage(err));
@@ -94,10 +194,20 @@ function AiPanel() {
           </Button>
           {status && <span className="text-sm text-slate-400">{status}</span>}
         </div>
+
         <p className="text-xs text-slate-500">
-          Powers “✨ AI course”, “✨ Generate items”, and per-item mnemonics. Calls go directly
-          from this browser to api.anthropic.com; the key is stored only in this browser's local
-          database — use a key you can rotate, and don't use this on shared machines.
+          Powers “✨ AI course”, “✨ Generate items”, mnemonics, and leech rescue. Calls go
+          directly from this browser to the provider; keys are stored only in this browser's
+          local database and never included in backups. Custom endpoints must allow browser
+          CORS (Ollama: set OLLAMA_ORIGINS).
+        </p>
+        <p className="text-xs text-slate-500">
+          <span className="text-slate-400">Using a ChatGPT/Codex subscription instead of a key?</span>{' '}
+          OpenAI's subscription sign-in (Codex OAuth) isn't available to third-party apps — but the
+          Codex CLI can drive this app through the srs-mcp server:{' '}
+          <code className="text-slate-400">codex mcp add srs -- npx tsx …\srs-mcp\index.ts</code>,
+          then ask Codex to build decks and import them from the Inbox. Same for Claude
+          subscriptions via Claude Code/Desktop.
         </p>
       </div>
     </Panel>

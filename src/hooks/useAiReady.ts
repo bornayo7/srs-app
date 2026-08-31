@@ -1,10 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '@/db/db';
+import { aiConfigReady, getAiConfig } from '@/ai/config';
 
-/** true = key configured, false = no key, undefined = still loading. */
+/** true = active provider fully configured, false = not, undefined = loading. */
 export function useAiReady(): boolean | undefined {
-  return useLiveQuery(async () => {
-    const row = await db.meta.get('ai:apiKey');
-    return typeof row?.value === 'string' && row.value.length > 0;
-  }, []);
+  return useLiveQuery(async () => aiConfigReady(await getAiConfig()), []);
 }

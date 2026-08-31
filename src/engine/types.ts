@@ -184,6 +184,8 @@ export interface ReviewLog {
     | { kind: 'ladder'; incorrectCount: number; fromStage: number; toStage: number }
     | { kind: 'fsrs'; rating: 1 | 2 | 3 | 4; elapsedDays: number; scheduledDays: number };
   prev: CardSnapshot; // full snapshot → O(1) undo, auditability
+  /** Enough card identity to resurrect a deleted ghost card on undo. */
+  cardMeta?: { templateId: string; isGhost?: boolean; parentCardId?: string };
 }
 
 // ---------- Misc ----------
@@ -199,4 +201,11 @@ export interface MediaAsset {
 export interface MetaRow {
   key: string;
   value: unknown;
+}
+
+/** Quick-capture note — jotted in seconds, converted to a real item later. */
+export interface Capture {
+  id: string;
+  text: string;
+  createdAt: number;
 }

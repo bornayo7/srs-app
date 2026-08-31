@@ -6,8 +6,9 @@ import { Badge, Button, Panel, TextInput } from '@/components/ui';
 import { useCourse, useCourseLadder } from '@/hooks/useCourseData';
 import { useNowTick } from '@/hooks/useNowTick';
 import { itemPreview } from '@/engine/grading/context';
+import { parseClozeLines } from '@/engine/grading/cloze';
 import { formatDuration, HOUR, minutesToMs } from '@/engine/time';
-import type { Card, ItemType, SrsLadder } from '@/engine/types';
+import type { Card, FieldValue, ItemType, SrsLadder } from '@/engine/types';
 import { newId } from '@/engine/ids';
 import { createItem, deleteItem, updateItem } from '@/db/repo/items';
 import { deleteCourse, updateCourse } from '@/db/repo/courses';
@@ -103,9 +104,15 @@ function ItemsPanel({
                 {item.status === 'lesson' ? (
                   <Badge color="sky">lesson queue</Badge>
                 ) : (
-                  (cards?.get(item.id) ?? []).map((c) => (
-                    <span key={c.id}>{stageBadge(ladder, c, t)}</span>
-                  ))
+                  (cards?.get(item.id) ?? []).map((c) =>
+                    c.isGhost ? (
+                      <span key={c.id} title="ghost drill pending">
+                        <Badge color="sky">👻</Badge>
+                      </span>
+                    ) : (
+                      <span key={c.id}>{stageBadge(ladder, c, t)}</span>
+                    ),
+                  )
                 )}
                 {aiReady && (
                   <Button
@@ -139,6 +146,7 @@ function AddItemForm({ types }: { courseId: string; types: ItemType[] }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [synonyms, setSynonyms] = useState('');
   const [note, setNote] = useState('');
+  const [formError, setFormError] = useState('');
   const ty = types.find((x) => x.id === typeId) ?? types[0];
   if (!ty) return null;
 
@@ -148,8 +156,24 @@ function AddItemForm({ types }: { courseId: string; types: ItemType[] }) {
         className="space-y-3"
         onSubmit={async (e) => {
           e.preventDefault();
+          setFormError('');
           const missing = ty.fields.some((f) => !(values[f.id] ?? '').trim());
           if (missing) return;
+          // cloze fields are typed as text and parsed line-by-line
+          const fieldValues: Record<string, FieldValue> = {};
+          for (const f of ty.fields) {
+            const raw = (values[f.id] ?? '').trim();
+            if (f.kind === 'clozeSentences') {
+              const { sentences, error } = parseClozeLines(raw);
+              if (error) {
+                setFormError(`${f.name}: ${error}`);
+                return;
+              }
+              fieldValues[f.id] = sentences;
+            } else {
+              fieldValues[f.id] = raw;
+            }
+          }
           const syns = synonyms
             .split(',')
             .map((s) => s.trim())
@@ -160,9 +184,7 @@ function AddItemForm({ types }: { courseId: string; types: ItemType[] }) {
             {
               courseId: ty.courseId,
               typeId: ty.id,
-              fieldValues: Object.fromEntries(
-                ty.fields.map((f) => [f.id, (values[f.id] ?? '').trim()]),
-              ),
+              fieldValues,
               synonyms: synMap,
               note: note.trim(),
             },
@@ -187,16 +209,32 @@ function AddItemForm({ types }: { courseId: string; types: ItemType[] }) {
           </select>
         )}
         <div className="grid gap-2 sm:grid-cols-2">
-          {ty.fields.map((f) => (
-            <label key={f.id} className="block">
-              <span className="mb-1 block text-xs text-slate-400">{f.name}</span>
-              <TextInput
-                value={values[f.id] ?? ''}
-                onChange={(e) => setValues({ ...values, [f.id]: e.target.value })}
-              />
-            </label>
-          ))}
+          {ty.fields.map((f) =>
+            f.kind === 'clozeSentences' ? (
+              <label key={f.id} className="block sm:col-span-2">
+                <span className="mb-1 block text-xs text-slate-400">
+                  {f.name} — one sentence per line, blank in ⟦brackets⟧, optional "&nbsp;:: translation"
+                </span>
+                <textarea
+                  value={values[f.id] ?? ''}
+                  onChange={(e) => setValues({ ...values, [f.id]: e.target.value })}
+                  rows={3}
+                  placeholder={'The cat sat ⟦on⟧ the mat. :: translation here\nHang ⟦on⟧ a second!'}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-violet-500"
+                />
+              </label>
+            ) : (
+              <label key={f.id} className="block">
+                <span className="mb-1 block text-xs text-slate-400">{f.name}</span>
+                <TextInput
+                  value={values[f.id] ?? ''}
+                  onChange={(e) => setValues({ ...values, [f.id]: e.target.value })}
+                />
+              </label>
+            ),
+          )}
         </div>
+        {formError && <p className="text-sm text-rose-300">{formError}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
           <label className="block">
             <span className="mb-1 block text-xs text-slate-400">
@@ -324,6 +362,7 @@ function CourseSettings({ course }: { course: NonNullable<ReturnType<typeof useC
   const navigate = useNavigate();
   const [newPerDay, setNewPerDay] = useState(course.lessons.newPerDay);
   const [batchSize, setBatchSize] = useState(course.lessons.batchSize);
+  const [ghosts, setGhosts] = useState(course.ghosts);
   return (
     <Panel title="Course settings">
       <div className="flex flex-wrap items-end gap-3">
@@ -347,10 +386,23 @@ function CourseSettings({ course }: { course: NonNullable<ReturnType<typeof useC
             className="max-w-28"
           />
         </label>
+        <label className="block">
+          <span className="mb-1 block text-xs text-slate-400">👻 Ghost reviews</span>
+          <select
+            value={ghosts}
+            onChange={(e) => setGhosts(e.target.value as typeof ghosts)}
+            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
+            title="Missed cards spawn short-cycle drill copies that graduate and vanish (Bunpro-style)"
+          >
+            <option value="off">off</option>
+            <option value="minimal">minimal — after repeated misses</option>
+            <option value="on">on — every miss</option>
+          </select>
+        </label>
         <Button
           variant="primary"
           onClick={() =>
-            void updateCourse({ ...course, lessons: { newPerDay, batchSize } }, now())
+            void updateCourse({ ...course, lessons: { newPerDay, batchSize }, ghosts }, now())
           }
         >
           Save
@@ -415,6 +467,20 @@ export default function CoursePage() {
           </Link>
         </div>
       </div>
+
+      <Panel title="Extra study (no SRS effect)">
+        <div className="flex flex-wrap gap-2">
+          <Link to={`/cram/${course.id}?scope=learned`}>
+            <Button>🎯 Cram everything learned</Button>
+          </Link>
+          <Link to={`/cram/${course.id}?scope=leeches`}>
+            <Button>🩹 Leeches (3+ lapses)</Button>
+          </Link>
+          <Link to={`/cram/${course.id}?scope=misses`}>
+            <Button>🔁 Missed this week</Button>
+          </Link>
+        </div>
+      </Panel>
 
       <ItemsPanel course={course} types={types} ladder={ladder ?? null} />
       <AddItemForm courseId={course.id} types={types} />
