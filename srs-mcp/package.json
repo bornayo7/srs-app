@@ -1,0 +1,20 @@
+{
+  "name": "srs-mcp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server that lets AI assistants create courses and items for the SRS app via the exchange folder",
+  "scripts": {
+    "start": "tsx index.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "tsx": "^4.19.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^7.0.0"
+  }
+}
