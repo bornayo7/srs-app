@@ -131,6 +131,8 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
           (id) => t.fields.find((f) => f.id === id)?.name ?? id,
         ),
         answerField: t.fields.find((f) => f.id === tpl.answerFieldId)?.name ?? tpl.answerFieldId,
+        mode: tpl.grading.mode === 'choice' ? ('choice' as const) : undefined,
+        choices: tpl.grading.mode === 'choice' ? tpl.grading.choices : undefined,
         answerLang: tpl.grading.mode === 'typed' ? tpl.grading.answerLang : undefined,
         typoTolerance: tpl.grading.mode === 'typed' ? tpl.grading.typoTolerance : undefined,
       })),

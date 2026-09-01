@@ -3,6 +3,7 @@ import { createCourse } from '@/db/repo/courses';
 import { createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
 import { createItem, type CreateItemInput } from '@/db/repo/items';
 import { extractBlank, isClozeSentences } from '@/engine/grading/cloze';
+import { DEFAULT_CHOICE_COUNT } from '@/engine/grading/choice';
 import { DEFAULT_PASS_PERCENT } from '@/engine/levels';
 import type { Course, FieldValue, ItemType } from '@/engine/types';
 import type { CreateCoursePacket, AddItemsPacket, Packet, PacketItem } from './schema';
@@ -168,11 +169,13 @@ async function applyCreateCourse(packet: CreateCoursePacket, now: number): Promi
                   ? // answering INTO sentences = sentence-cloze; the field id is
                     // resolved by createItemType
                     { mode: 'sentenceCloze' as const, sentencesFieldId: '', rotation: 'random' as const }
-                  : {
-                      mode: 'typed' as const,
-                      answerLang: t.answerLang ?? 'latin',
-                      typoTolerance: t.typoTolerance ?? true,
-                    },
+                  : t.mode === 'choice'
+                    ? { mode: 'choice' as const, choices: t.choices ?? DEFAULT_CHOICE_COUNT }
+                    : {
+                        mode: 'typed' as const,
+                        answerLang: t.answerLang ?? 'latin',
+                        typoTolerance: t.typoTolerance ?? true,
+                      },
             };
           }),
         };

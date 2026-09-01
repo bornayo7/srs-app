@@ -194,7 +194,7 @@ server.tool(
 
 server.tool(
   'create_course',
-  'Create a whole new SRS course. Design an item type (2-4 fields), 1-2 quiz templates (prompt fields shown → answer field the user TYPES; keep answers 1-4 short typeable words), and the items. The packet lands in the app Inbox for one-click import.',
+  'Create a whole new SRS course. Design an item type (2-4 fields), 1-2 quiz templates (prompt fields shown → answer field the user answers; keep typed answers 1-4 short typeable words, or set mode "choice" for multiple choice), and the items. The packet lands in the app Inbox for one-click import.',
   {
     name: z.string().describe('Course name'),
     description: z.string().optional(),
@@ -227,6 +227,19 @@ server.tool(
             name: z.string(),
             promptFields: z.array(z.string()).min(1),
             answerField: z.string(),
+            mode: z
+              .enum(['typed', 'choice'])
+              .optional()
+              .describe(
+                'typed (default) = the user types the answer; choice = multiple choice, with wrong options taken automatically from the other items of this type (so write at least ~6 items)',
+              ),
+            choices: z
+              .number()
+              .int()
+              .min(2)
+              .max(6)
+              .optional()
+              .describe('Options shown in choice mode (default 4)'),
             answerLang: z
               .enum(['latin', 'kana'])
               .optional()
@@ -256,6 +269,8 @@ server.tool(
               name: t.name,
               promptFields: t.promptFields,
               answerField: t.answerField,
+              mode: t.mode,
+              choices: t.choices,
               answerLang: t.answerLang,
             })),
           },

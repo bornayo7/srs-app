@@ -4,6 +4,8 @@ import { matchTypedAnswer, type MatchContext, type MatchVerdict } from '@/engine
 import { buildMatchContext } from '@/engine/grading/context';
 import { isKanaTypeable } from '@/engine/grading/normalize';
 import { pickClozeSentence, type ClozePick } from '@/engine/grading/cloze';
+import type { ChoiceOption } from '@/engine/grading/choice';
+import { buildEntryChoices, newChoiceCache, type ChoiceCache } from '@/services/choices';
 import { mulberry32, orderEntries, reinsertIndex } from '@/engine/queue';
 import { newId } from '@/engine/ids';
 import { db } from '@/db/db';
@@ -19,6 +21,8 @@ export interface SessionEntry {
   template: CardTemplate;
   /** Present for sentence-cloze templates: the sentence chosen for this session. */
   cloze?: ClozePick;
+  /** Present for multiple-choice templates that found enough distractors. */
+  choices?: ChoiceOption[];
 }
 
 /** Grading context for any entry, cloze-aware. Exported for the cram page. */
@@ -50,6 +54,20 @@ export function withClozePick<T extends Omit<SessionEntry, 'cloze'>>(
 ): T & { cloze?: ClozePick } {
   const cloze = pickClozeSentence(entry.item, entry.template, seed, entry.card.stats.reviews);
   return cloze ? { ...entry, cloze } : entry;
+}
+
+/**
+ * Attach multiple-choice options when the template asks for them. Hits the DB
+ * for sibling answers, so pass a cache when building a whole queue. Templates
+ * without enough distractors come back unchanged and fall back to typing.
+ */
+export async function withChoices<T extends SessionEntry>(
+  entry: T,
+  seed: number,
+  cache?: ChoiceCache,
+): Promise<T> {
+  const choices = await buildEntryChoices(entry, seed, cache);
+  return choices ? { ...entry, choices } : entry;
 }
 
 export interface CompletedReview {
@@ -126,13 +144,20 @@ export const useSession = create<SessionState>((set, get) => ({
     );
 
     const sessionSeed = now() & 0x7fffffff;
+    const cache = newChoiceCache();
     const entries: SessionEntry[] = [];
     for (const [i, card] of cards.entries()) {
       const item = items.get(card.itemId);
       const itemType = item && types.get(item.typeId);
       const template = itemType?.templates.find((t) => t.id === card.templateId);
       if (item && itemType && template) {
-        entries.push(withClozePick({ card, item, itemType, template }, sessionSeed + i));
+        entries.push(
+          await withChoices(
+            withClozePick({ card, item, itemType, template }, sessionSeed + i),
+            sessionSeed + i,
+            cache,
+          ),
+        );
       }
     }
 
