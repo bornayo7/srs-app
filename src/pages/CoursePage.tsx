@@ -4,7 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
 import { db } from '@/db/db';
 import { Badge, Button, Panel, TextInput } from '@/components/ui';
-import { useCourse, useCourseLadder } from '@/hooks/useCourseData';
+import { useCourse, useCourseLadder, usePendingReviewCount, usePlan } from '@/hooks/useCourseData';
 import { useNowTick } from '@/hooks/useNowTick';
 import { itemPreview } from '@/engine/grading/context';
 import { DEFAULT_PASS_PERCENT } from '@/engine/levels';
@@ -355,6 +355,34 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
   );
 }
 
+const RELEASE_LABEL = { progress: 'by progress', schedule: 'by date', manual: 'by hand' } as const;
+
+/** Planned courses: where you are in the syllabus, and how much AI output awaits review. */
+function PlanPanel({ course }: { course: Course }) {
+  const plan = usePlan(course.id);
+  const pending = usePendingReviewCount(course.id) ?? 0;
+  if (!plan) return null;
+  const unit = plan.units.find((u) => u.level === course.currentLevel);
+  return (
+    <Panel
+      title="Course plan"
+      actions={
+        <Link to={`/plan/${course.id}`}>
+          <Button variant={pending > 0 ? 'primary' : 'secondary'}>
+            {pending > 0 ? `Review ${pending} proposal${pending === 1 ? '' : 's'}` : 'Open plan'}
+          </Button>
+        </Link>
+      }
+    >
+      <p className="text-sm text-slate-300">
+        Unit {course.currentLevel} of {plan.units.length}
+        {unit ? ` — ${unit.title}` : ''}
+        <span className="text-slate-500"> · units open {RELEASE_LABEL[plan.releaseMode]}</span>
+      </p>
+    </Panel>
+  );
+}
+
 /** Level progress, unlock tallies, stage distribution, and the repair button. */
 function ProgressPanel({
   course,
@@ -425,7 +453,11 @@ function ProgressPanel({
             <div className="flex items-center justify-between text-sm">
               <span className="font-semibold text-slate-100">Level {progress.level}</span>
               <span className="text-xs text-slate-500">
-                {progress.stalled ? (
+                {course.levelConfig?.autoAdvance === false ? (
+                  // a plan in schedule/manual mode owns the level — the
+                  // "stalled" hint would send the user chasing gate items
+                  <span>level set by the course plan</span>
+                ) : progress.stalled ? (
                   <span className="text-amber-300">
                     no {gateNames.length > 0 ? gateNames.join('/') : 'gate'} items at this level —
                     add some (or change gate types) to advance
@@ -785,6 +817,7 @@ export default function CoursePage() {
         </div>
       </Panel>
 
+      <PlanPanel course={course} />
       <ProgressPanel course={course} ladder={ladder ?? null} types={types} />
       <ItemsPanel course={course} types={types} ladder={ladder ?? null} />
       <AddItemForm course={course} types={types} />

@@ -1,6 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/db/db';
 import { dueCount, scheduledCards } from '@/db/repo/cards';
+import { planForCourse } from '@/db/repo/plans';
+import { pendingCount } from '@/db/repo/proposals';
 import { lessonAvailability } from '@/services/lessons';
 import type { Course } from '@/engine/types';
 
@@ -29,6 +31,16 @@ export function useDueCount(courseId: string, now: number): number | undefined {
 
 export function useLessonAvailability(courseId: string, now: number) {
   return useLiveQuery(() => lessonAvailability(courseId, now), [courseId, now]);
+}
+
+/** The course's plan, if it has one (undefined while loading or when it doesn't). */
+export function usePlan(courseId: string | undefined) {
+  return useLiveQuery(() => (courseId ? planForCourse(courseId) : undefined), [courseId]);
+}
+
+/** Proposals waiting for review in a course. */
+export function usePendingReviewCount(courseId: string): number | undefined {
+  return useLiveQuery(() => pendingCount(courseId), [courseId]);
 }
 
 /** All scheduled cards across every course — forecast input. */

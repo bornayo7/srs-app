@@ -7,6 +7,7 @@ import SettingsPage from '@/pages/SettingsPage';
 import InboxPage from '@/pages/InboxPage';
 import CramPage from '@/pages/CramPage';
 import StatsPage from '@/pages/StatsPage';
+import PlanPage from '@/pages/PlanPage';
 
 export default function App() {
   return (
@@ -57,6 +58,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/course/:courseId" element={<CoursePage />} />
+            <Route path="/plan/:courseId" element={<PlanPage />} />
             <Route path="/lessons/:courseId" element={<LessonPage />} />
             <Route path="/review/:courseId" element={<ReviewPage />} />
             <Route path="/cram/:courseId" element={<CramPage />} />
