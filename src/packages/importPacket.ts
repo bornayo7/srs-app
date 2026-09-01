@@ -336,6 +336,33 @@ async function applyAddItems(packet: AddItemsPacket, now: number): Promise<Impor
   });
 }
 
+/** Resolve one packet item against a course's types — throws with a precise message. */
+export function resolvePacketItem(
+  item: PacketItem,
+  types: ItemType[],
+  index = 0,
+): { itemType: ItemType; resolved: Pick<CreateItemInput, 'fieldValues' | 'synonyms' | 'note' | 'level'> } {
+  const itemType = pickType(item, types, index);
+  return { itemType, resolved: resolveItem(item, itemType, index) };
+}
+
+/**
+ * The review queue's per-row checks: a validation error (without the batch
+ * index prefix — rows are reviewed one at a time) and a duplicate flag.
+ */
+export function dryRunProposal(
+  item: PacketItem,
+  types: ItemType[],
+  existing: readonly Item[],
+): { error: string | null; duplicateOf: string | null } {
+  try {
+    const { itemType } = resolvePacketItem(item, types);
+    return { error: null, duplicateOf: findDuplicate(item, itemType, existing) };
+  } catch (err) {
+    return { error: (err as Error).message.replace(/^Item \d+: /, ''), duplicateOf: null };
+  }
+}
+
 /**
  * Dry-run proposed items against the course's types. A bad row gets an error
  * string instead of failing the batch — the review queue exists so a human can
@@ -347,16 +374,10 @@ function draftProposals(
   existing: readonly Item[],
   defaultLevel: number,
 ): ProposalDraft[] {
-  return items.map((raw, i) => {
+  return items.map((raw) => {
     const level = raw.level ?? defaultLevel;
     const item = { ...raw, level };
-    try {
-      const itemType = pickType(item, types, i);
-      resolveItem(item, itemType, i);
-      return { level, item, error: null, duplicateOf: findDuplicate(item, itemType, existing) };
-    } catch (err) {
-      return { level, item, error: (err as Error).message, duplicateOf: null };
-    }
+    return { level, item, ...dryRunProposal(item, types, existing) };
   });
 }
 
