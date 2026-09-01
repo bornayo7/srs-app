@@ -60,11 +60,26 @@ command. Set the `SRS_EXCHANGE` environment variable to use a folder other than
 | `list_courses` | Courses + counts + item-type schemas (call first) |
 | `get_course` | Full detail incl. every item — for matching field names / avoiding dupes |
 | `get_struggling_items` | Your leeches, most-failed first |
-| `create_course` | Design a new course (type, templates, items) → Inbox packet |
-| `add_items` | Add items to an existing course → Inbox packet |
+| `create_course` | Design a new course (type, templates, items) → Inbox packet, imported as-is |
+| `add_items` | Add items to an existing course → Inbox packet, imported as-is |
+| `propose_course_plan` | A **progressive** course from your syllabus/notes: ordered units that open one at a time, plus proposed items per unit → review queue |
+| `propose_items` | Propose items into an existing course's **review queue** (optionally into a specific unit) |
 
 Packets are validated twice — here before writing, and again in the app before import. Nothing
 is ever auto-imported; you always click Import in the Inbox.
+
+## Progressive courses (plans)
+
+Give the assistant your course material and ask for a plan:
+
+> *"Here's my BIO 101 syllabus and week 1–3 notes. Use `propose_course_plan` to build a course
+> that opens one unit per week, with definitions and multiple-choice questions."*
+
+The packet creates the course with one **level per unit** and parks every proposed item in the
+app's review queue. Open the course → **Open plan** to accept, edit, or reject each item; accepted
+items enter the lesson queue when their unit opens (by progress, by date, or by hand). Later,
+*"propose 15 more items for unit 4"* → `propose_items` with `unit=4`. `list_courses` shows each
+plan's units, which are open, and how many proposals await review.
 
 Try: *“Make me a 30-item deck of the most common French verbs with mnemonics”* or
 *“Look at what I keep failing in CS Terms and write better mnemonics for those items.”*

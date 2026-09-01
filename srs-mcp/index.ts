@@ -35,6 +35,12 @@ interface SnapshotCourse {
   items: { preview: string; type: string; fields: Record<string, string>; lapses: number; note?: string }[];
   struggling: { preview: string; fields: Record<string, string>; lapses: number; note?: string }[];
   ladder: { name: string } | null;
+  currentLevel?: number;
+  /** Planned (progressive) courses: units map 1:1 onto levels. */
+  plan?: {
+    releaseMode: 'progress' | 'schedule' | 'manual';
+    units: { level: number; title: string; released: boolean; releaseAt: string | null; pendingProposals: number }[];
+  } | null;
 }
 
 async function readSnapshot(): Promise<{ generatedAt: number; courses: SnapshotCourse[] }> {
@@ -127,7 +133,48 @@ const itemInput = z.object({
   note: z.string().optional().describe('A short mnemonic shown during lessons and after misses'),
 });
 
-const server = new McpServer({ name: 'srs', version: '0.1.0' });
+const templateInput = z.object({
+  name: z.string(),
+  promptFields: z.array(z.string()).min(1),
+  answerField: z.string(),
+  mode: z
+    .enum(['typed', 'choice'])
+    .optional()
+    .describe(
+      'typed (default) = the user types the answer (keep it 1-4 words); choice = multiple choice, wrong options drawn automatically from other items of this type (so write at least ~6 per type)',
+    ),
+  choices: z.number().int().min(2).max(6).optional().describe('Options shown in choice mode (default 4)'),
+  answerLang: z.enum(['latin', 'kana']).optional().describe('kana = answer typed in Japanese kana, exact match'),
+});
+
+const itemTypeInput = z.object({
+  name: z.string().describe('Singular noun, e.g. "Term", "Question", "Formula"'),
+  icon: z.string().optional().describe('One emoji'),
+  fields: z.array(z.string()).min(1).describe('Field names, 2-4'),
+  templates: z.array(templateInput).min(1),
+});
+
+const unitInput = z.object({
+  title: z.string().describe('Short unit title, e.g. "Week 3 — Cell division"'),
+  summary: z.string().optional().describe('One sentence'),
+  topics: z.array(z.string()).optional().describe('3-8 specific things worth remembering from this unit'),
+  targetCount: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('How many items this unit deserves (the app uses it when drafting more later)'),
+  releaseAt: z
+    .string()
+    .optional()
+    .describe('ISO date (YYYY-MM-DD) the unit opens — used by the "schedule" release mode'),
+  items: z
+    .array(itemInput)
+    .optional()
+    .describe('Proposed items for this unit. They go to the app’s REVIEW QUEUE, not straight into the course.'),
+});
+
+const server = new McpServer({ name: 'srs', version: '0.2.0' });
 
 server.tool(
   'list_courses',
@@ -146,7 +193,12 @@ server.tool(
                 .join(', ')}`,
           )
           .join(' | ');
-        return `• ${c.name} (id ${c.id})\n  ${c.description || 'no description'}\n  items: ${c.counts.items}, lesson queue: ${c.counts.lessonQueue}, due now: ${c.counts.dueNow}, ladder: ${c.ladder?.name ?? 'FSRS'}\n  ${types}`;
+        const plan = c.plan
+          ? `\n  PLAN (${c.plan.releaseMode} release): ${c.plan.units
+              .map((u) => `unit ${u.level} "${u.title}"${u.released ? ' [open]' : u.releaseAt ? ` [opens ${u.releaseAt}]` : ' [locked]'}${u.pendingProposals ? ` (${u.pendingProposals} awaiting review)` : ''}`)
+              .join(', ')} — propose items with propose_items(unit=N)`
+          : '';
+        return `• ${c.name} (id ${c.id})\n  ${c.description || 'no description'}\n  items: ${c.counts.items}, lesson queue: ${c.counts.lessonQueue}, due now: ${c.counts.dueNow}, ladder: ${c.ladder?.name ?? 'FSRS'}\n  ${types}${plan}`;
       });
       return ok(`${lines.join('\n')}\n\n(${snapshotAge(snap)})`);
     } catch (err) {
@@ -194,7 +246,7 @@ server.tool(
 
 server.tool(
   'create_course',
-  'Create a whole new SRS course. Design an item type (2-4 fields), 1-2 quiz templates (prompt fields shown → answer field the user answers; keep typed answers 1-4 short typeable words, or set mode "choice" for multiple choice), and the items. The packet lands in the app Inbox for one-click import.',
+  'Create a whole new SRS course, imported as-is. Design an item type (2-4 fields), 1-2 quiz templates (prompt fields shown → answer field the user answers; keep typed answers 1-4 short typeable words, or set mode "choice" for multiple choice), and the items. The packet lands in the app Inbox for one-click import. For a course built from a syllabus or notes that should unlock unit by unit with per-item approval, use propose_course_plan instead.',
   {
     name: z.string().describe('Course name'),
     description: z.string().optional(),
@@ -288,8 +340,104 @@ server.tool(
 );
 
 server.tool(
+  'propose_course_plan',
+  'Create a PROGRESSIVE course from the user’s own course material (a syllabus, lecture notes, chapters): ordered UNITS that open one at a time (unit N = level N), 1-3 item types, and optionally proposed items per unit. Every proposed item goes to a review queue in the app where the user accepts, edits, or rejects it — nothing enters their reviews unapproved. Use this instead of create_course whenever the user wants content to arrive as the course progresses. Include the material itself so the app can draft later units from it.',
+  {
+    name: z.string().describe('Course name'),
+    description: z.string().optional(),
+    ladderPreset: z
+      .enum(['classic', 'gentle', 'bunpro'])
+      .optional()
+      .describe('SRS ladder: classic (WaniKani 4h→4mo, burns), gentle (never burns), bunpro (gradual). Default classic.'),
+    releaseMode: z
+      .enum(['progress', 'schedule', 'manual'])
+      .optional()
+      .describe(
+        'How units open: progress (default) = when enough of the current unit reaches the pass stage; schedule = on each unit’s releaseAt date; manual = only when the user presses "Release next unit".',
+      ),
+    passPercent: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe('progress mode: percent of a unit’s items that must pass to open the next (default 90)'),
+    newPerDay: z.number().int().min(0).optional().describe('Daily new-lesson cap — the within-unit drip (default 15)'),
+    itemTypes: z.array(itemTypeInput).min(1).max(3),
+    units: z.array(unitInput).min(1).describe('In course order. Author items in dependency order across units — a prereq key must be defined earlier.'),
+    material: z
+      .string()
+      .optional()
+      .describe('The source material in full (syllabus / notes). Saved with the plan so later units can be drafted from it; never shown as a card.'),
+  },
+  async ({ name, description, ladderPreset, releaseMode, passPercent, newPerDay, itemTypes, units, material }) => {
+    try {
+      await readSnapshot(); // proves the exchange folder is connected
+      const packet = {
+        format: PACKET_FORMAT,
+        version: PACKET_VERSION,
+        kind: 'course-plan',
+        course: { name, description, ladderPreset, releaseMode, passPercent, newPerDay },
+        itemTypes: itemTypes.map((t) => ({
+          name: t.name,
+          icon: t.icon,
+          fields: t.fields.map((f) => ({ name: f })),
+          templates: t.templates,
+        })),
+        units,
+        material,
+      };
+      const fileName = await writePacket(`plan-${name}`, packet);
+      const proposed = units.reduce((n, u) => n + (u.items?.length ?? 0), 0);
+      return ok(
+        `Packet written: inbox/${fileName} — planned course "${name}" with ${units.length} unit(s) and ${proposed} proposed item(s). Tell the user to open the SRS app → Inbox → Import, then review the proposals on the course’s Plan page (Course page → "Open plan").`,
+      );
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.tool(
+  'propose_items',
+  'Propose items for an EXISTING course’s REVIEW QUEUE — the user accepts or rejects each one before it enters their reviews. Prefer this over add_items for anything drafted from course material. For planned courses, pass unit=N so the items enter that unit (level) and stay locked until it opens. Call get_course first for exact field names, existing items (avoid duplicates; their ids can be prerequisites), and the unit list.',
+  {
+    course: z.string().describe('Course id (preferred) or exact course name'),
+    type: z.string().optional().describe('Item type name — required only when the course has multiple types'),
+    unit: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe('Target unit (= level) for items that don’t set their own level; default: the course’s current level'),
+    items: z.array(itemInput).min(1),
+  },
+  async ({ course: ref, type, unit, items }) => {
+    try {
+      const snap = await readSnapshot();
+      const course = findCourse(snap, ref);
+      const packet = {
+        format: PACKET_FORMAT,
+        version: PACKET_VERSION,
+        kind: 'propose-items',
+        courseId: course.id,
+        courseName: course.name,
+        unit,
+        items: items.map((i) => (type ? { ...i, type } : i)),
+      };
+      const fileName = await writePacket(`propose-${course.name}`, packet);
+      return ok(
+        `Packet written: inbox/${fileName} — ${items.length} item(s) proposed for "${course.name}"${unit ? ` (unit ${unit})` : ''}. Tell the user to open the SRS app → Inbox → Import, then accept or reject them on the course’s Plan page.`,
+      );
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.tool(
   'add_items',
-  'Add items to an EXISTING course. Call get_course first to copy its exact field names and check for duplicates. The packet lands in the app Inbox for one-click import.',
+  'Add items DIRECTLY to an EXISTING course (they enter the lesson queue on import, with no per-item review). For drafts the user should approve first, use propose_items instead. Call get_course first to copy its exact field names and check for duplicates. The packet lands in the app Inbox for one-click import.',
   {
     course: z.string().describe('Course id (preferred) or exact course name'),
     type: z
