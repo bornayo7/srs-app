@@ -1,4 +1,12 @@
-import type { CardTemplate, FieldDef, FieldKind, FieldValue, ItemType } from './types';
+import type {
+  CardLifecycle,
+  CardTemplate,
+  FieldDef,
+  FieldKind,
+  FieldValue,
+  ItemStatus,
+  ItemType,
+} from './types';
 import { clozeSummary, isClozeSentences, parseClozeLines, revealBlank } from './grading/cloze';
 
 /**
@@ -166,6 +174,24 @@ export function migrateFieldValues(
     out[f.id] = convertFieldValue(values[f.id], before.kind, f.kind);
   }
   return out; // fields removed from the type are simply not copied over
+}
+
+/**
+ * Reconcile an item's lifecycle status with the cards it actually holds:
+ * - an active item that gained an untaught card returns to the lesson queue
+ *   (lessons only draw from status 'lesson', so the card would never be taught)
+ * - a lesson-queue item with nothing left to teach becomes active again
+ * Locked items are left alone — prerequisite gating owns that state.
+ */
+export function studyStatus(
+  current: ItemStatus,
+  cards: { state: CardLifecycle }[],
+): ItemStatus {
+  if (current === 'locked' || cards.length === 0) return current;
+  const untaught = cards.some((c) => c.state === 'new');
+  if (current === 'active' && untaught) return 'lesson';
+  if (current === 'lesson' && !untaught) return 'active';
+  return current;
 }
 
 /** Drop per-template maps (synonyms/blockList/guidance) for deleted templates. */

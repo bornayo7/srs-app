@@ -17,6 +17,7 @@ import {
 } from './manualSrs';
 import { dueCards } from '@/db/repo/cards';
 import { completeLessonBatch, nextLessonBatch } from './lessons';
+import { recomputeUnlocks } from './gating';
 
 const NOW = Date.UTC(2026, 0, 15, 10, 23);
 const PASS_STAGE = 4; // classic ladder: index 4 is the Guru-equivalent
@@ -103,6 +104,30 @@ describe('item-type designer — saving migrates existing content', () => {
     expect((await db.items.get(a.id))!.status).toBe('lesson');
     expect(cards.find((c) => c.templateId === type.templates[0].id)!.state).toBe('review');
     expect(await nextLessonBatch(course.id, NOW + 1000)).toHaveLength(1);
+  });
+
+  it('removing that template again returns the item to active — nothing left to teach', async () => {
+    const { course, type } = await setup();
+    const a = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, 'Q', 'A') },
+      NOW,
+    );
+    await completeLessonBatch([a.id], 'sess', NOW);
+
+    const added = {
+      id: newId(),
+      name: 'Reverse',
+      promptFieldIds: [type.fields[1].id],
+      answerFieldId: type.fields[0].id,
+      hintFieldIds: [],
+      grading: { mode: 'typed' as const, answerLang: 'latin' as const, typoTolerance: true },
+    };
+    const withExtra = { ...type, templates: [...type.templates, added] };
+    await saveItemTypeEdit(withExtra, NOW + 1000);
+    expect((await db.items.get(a.id))!.status).toBe('lesson');
+
+    await saveItemTypeEdit({ ...withExtra, templates: type.templates }, NOW + 2000);
+    expect((await db.items.get(a.id))!.status).toBe('active');
   });
 
   it('removing a template deletes its cards and their review history', async () => {
@@ -325,6 +350,23 @@ describe('manual SRS control', () => {
     const card = (await cardsOf(a.id))[0];
     expect(card.state).toBe('burned');
     expect(card.dueAt).toBeUndefined();
+  });
+});
+
+describe('recomputeUnlocks heals lesson/active drift', () => {
+  it('promotes a lesson-queue item whose cards are all scheduled', async () => {
+    const { course, type } = await setup();
+    const a = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, 'Q', 'A') },
+      NOW,
+    );
+    await completeLessonBatch([a.id], 'sess', NOW);
+    // simulate the stale state a pre-fix type edit could leave behind
+    await db.items.put({ ...(await db.items.get(a.id))!, status: 'lesson' });
+
+    const res = await recomputeUnlocks(course.id, NOW + 1000);
+    expect(res.changed).toBeGreaterThan(0);
+    expect((await db.items.get(a.id))!.status).toBe('active');
   });
 });
 

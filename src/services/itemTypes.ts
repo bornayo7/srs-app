@@ -4,10 +4,11 @@ import {
   diffItemType,
   migrateFieldValues,
   pruneTemplateMap,
+  studyStatus,
   validateItemType,
   type TypeDiff,
 } from '@/engine/typeDesign';
-import type { Card, Item, ItemType } from '@/engine/types';
+import type { Card, ItemType } from '@/engine/types';
 import { recomputeUnlocks } from './gating';
 import { deleteItem } from '@/db/repo/items';
 
@@ -76,25 +77,10 @@ export async function saveItemTypeEdit(draft: ItemType, now: number): Promise<Sa
         diff.addedTemplates.length > 0 ||
         prev.fields.length !== draft.fields.length;
 
-      for (const item of items) {
-        if (needsItemWrite) {
-          const next: Item = {
-            ...item,
-            fieldValues: migrateFieldValues(item.fieldValues, prev.fields, draft.fields),
-            synonyms: pruneTemplateMap(item.synonyms, diff.removedTemplateIds),
-            blockList: pruneTemplateMap(item.blockList, diff.removedTemplateIds),
-            guidance: pruneTemplateMap(item.guidance, diff.removedTemplateIds),
-            // A brand-new card on an already-active item would never be taught:
-            // lessons only draw from status 'lesson'. Send the item back so the
-            // new card gets a lesson; its existing cards keep their schedule.
-            ...(diff.addedTemplates.length > 0 && item.status === 'active'
-              ? { status: 'lesson' as const }
-              : {}),
-            updatedAt: now,
-          };
-          await db.items.put(next);
-        }
+      const cardsChange = removedTemplates.size > 0 || diff.addedTemplates.length > 0;
 
+      for (const item of items) {
+        // cards first: the item's status depends on what it ends up holding
         if (removedTemplates.size > 0) {
           const cards = await db.cards.where('itemId').equals(item.id).toArray();
           const doomed = cards.filter((c) => removedTemplates.has(c.templateId));
@@ -119,6 +105,27 @@ export async function saveItemTypeEdit(draft: ItemType, now: number): Promise<Sa
           }));
           await db.cards.bulkAdd(fresh);
           cardsAdded += fresh.length;
+        }
+
+        if (needsItemWrite) {
+          await db.items.put({
+            ...item,
+            fieldValues: migrateFieldValues(item.fieldValues, prev.fields, draft.fields),
+            synonyms: pruneTemplateMap(item.synonyms, diff.removedTemplateIds),
+            blockList: pruneTemplateMap(item.blockList, diff.removedTemplateIds),
+            guidance: pruneTemplateMap(item.guidance, diff.removedTemplateIds),
+            ...(cardsChange
+              ? {
+                  status: studyStatus(
+                    item.status,
+                    (await db.cards.where('itemId').equals(item.id).toArray()).filter(
+                      (c) => !c.isGhost,
+                    ),
+                  ),
+                }
+              : {}),
+            updatedAt: now,
+          });
         }
       }
 
