@@ -16,6 +16,8 @@ const MAX_ITEMS_PER_COURSE = 1000;
 export interface SnapshotItem {
   id: string;
   type: string;
+  /** Course level — the unit, for planned courses. */
+  level: number;
   preview: string;
   fields: Record<string, string>;
   status: string;
@@ -52,6 +54,16 @@ export async function buildSnapshot(now: number): Promise<Record<string, unknown
     const ladder =
       course.scheduling.kind === 'ladder' ? await db.ladders.get(course.scheduling.ladderId) : null;
 
+    // a planned course: units (= levels), what's open, and what awaits review —
+    // so an assistant can propose items into the right unit
+    const plan = await db.plans.where('courseId').equals(course.id).first();
+    const pendingByLevel = new Map<number, number>();
+    let pendingProposals = 0;
+    for (const p of await db.proposals.where('[courseId+status]').equals([course.id, 'pending']).toArray()) {
+      pendingByLevel.set(p.level, (pendingByLevel.get(p.level) ?? 0) + 1);
+      pendingProposals++;
+    }
+
     const toSnapshotItem = (item: Item): SnapshotItem | null => {
       const itemType = typeById.get(item.typeId);
       if (!itemType) return null;
@@ -75,6 +87,7 @@ export async function buildSnapshot(now: number): Promise<Record<string, unknown
       return {
         id: item.id,
         type: itemType.name,
+        level: item.level,
         preview: itemPreview(item, itemType).slice(0, 120),
         fields,
         status: item.status,
@@ -109,6 +122,24 @@ export async function buildSnapshot(now: number): Promise<Record<string, unknown
           }
         : null,
       lessons: course.lessons,
+      currentLevel: course.currentLevel,
+      plan: plan
+        ? {
+            releaseMode: plan.releaseMode,
+            hasMaterial: plan.material.length > 0,
+            units: plan.units.map((u) => ({
+              level: u.level,
+              title: u.title,
+              summary: u.summary,
+              topics: u.topics,
+              targetCount: u.targetCount,
+              released: u.level <= course.currentLevel,
+              releaseAt:
+                u.releaseAt === undefined ? null : new Date(u.releaseAt).toISOString().slice(0, 10),
+              pendingProposals: pendingByLevel.get(u.level) ?? 0,
+            })),
+          }
+        : null,
       itemTypes: types.map((t) => ({
         name: t.name,
         icon: t.icon,
@@ -127,6 +158,7 @@ export async function buildSnapshot(now: number): Promise<Record<string, unknown
         active: items.filter((i) => i.status === 'active').length,
         dueNow: reviewCards.filter((c) => c.dueAt !== undefined && c.dueAt <= now).length,
         burnedCards: burned,
+        pendingProposals,
       },
       items: snapshotItems,
       struggling,
