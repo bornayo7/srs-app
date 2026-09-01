@@ -37,8 +37,14 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
 - **AI (bring your own key)**: generate whole courses or items from a topic/pasted text, and
   one-click mnemonics — Anthropic (Claude) or any OpenAI-compatible API (OpenAI, Gemini,
   OpenRouter, Ollama, …), called directly from the browser
-- **MCP server** (`srs-mcp/`): let Claude, ChatGPT/Codex, or any MCP client read your courses
-  and drop new decks into the app's Inbox
+- **Course plans (progressive AI courses)**: paste a syllabus or your notes and the AI splits
+  it into ordered units (one per week/chapter) with 1-3 item types — terms, multiple-choice
+  questions, vocab. Each unit's items are drafted on demand into a **review queue** where you
+  accept, edit, or reject every one (rejections, with reasons, steer the next draft). Units are
+  course levels, so they open one at a time — by progress, by date, or by hand — and the daily
+  lesson cap drips items within a unit. Old units stay in your reviews for the whole course
+- **MCP server** (`srs-mcp/`): let Claude, ChatGPT/Codex, or any MCP client read your courses,
+  drop new decks into the app's Inbox, or propose a whole course plan / items into the review queue
 - **Anki `.apkg` import**, JSON course packages, quick-capture notes, browser TTS
 
 ## Run it
@@ -65,6 +71,8 @@ the Inbox. See [srs-mcp/README.md](srs-mcp/README.md).
   (the test target)
 - `src/db/` — Dexie (IndexedDB) schema, repos, backup import/export
 - `src/services/` — transactional write paths (`commitReview` is the one place reviews commit)
+- `src/services/plans.ts`, `proposals.ts` — course plans (units = levels, release modes) and the
+  AI review queue; `src/ai/plan.ts` — the two-stage planner (outline, then one unit at a time)
 - `src/packages/` — the `srs-packet` format: one validated JSON shape shared by MCP, AI
   generation, and file import
 - `src/exchange/` — snapshot + inbox folder bridge to the MCP server
