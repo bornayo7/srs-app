@@ -9,6 +9,7 @@ import {
   useCourses,
   useDueCount,
   useLessonAvailability,
+  usePendingReviewCount,
 } from '@/hooks/useCourseData';
 import { useNowTick } from '@/hooks/useNowTick';
 import { buildForecast } from '@/engine/forecast';
@@ -22,11 +23,13 @@ import { techSeed } from '@/db/seed/tech';
 import { clozeSeed } from '@/db/seed/cloze';
 import { japaneseSeed } from '@/db/seed/japanese';
 import { GenerateCoursePanel } from '@/components/ai/GenerateCoursePanel';
+import { PlanCoursePanel } from '@/components/ai/PlanCoursePanel';
 import type { Course } from '@/engine/types';
 
 function CourseRow({ course, t }: { course: Course; t: number }) {
   const due = useDueCount(course.id, t);
   const lessons = useLessonAvailability(course.id, t);
+  const pendingReview = usePendingReviewCount(course.id);
   return (
     <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3">
       <div className="min-w-0">
@@ -41,6 +44,14 @@ function CourseRow({ course, t }: { course: Course; t: number }) {
             </span>
           )}
         </Link>
+        {(pendingReview ?? 0) > 0 && (
+          <Link
+            to={`/plan/${course.id}`}
+            className="mt-0.5 inline-block rounded bg-sky-950/60 px-1.5 py-0.5 text-[10px] font-medium text-sky-300 hover:bg-sky-900/60"
+          >
+            {pendingReview} AI proposal{pendingReview === 1 ? '' : 's'} to review →
+          </Link>
+        )}
         <p className="truncate text-xs text-slate-500">{course.description}</p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
@@ -221,12 +232,21 @@ export default function Dashboard() {
   const courses = useCourses();
   const [creating, setCreating] = useState(false);
   const [aiCreating, setAiCreating] = useState(false);
+  const [planning, setPlanning] = useState(false);
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-100">Dashboard</h1>
         <div className="flex gap-2">
+          {!planning && (
+            <Button
+              onClick={() => setPlanning(true)}
+              title="Paste a syllabus or notes — units drip in as you progress"
+            >
+              📚 From my material
+            </Button>
+          )}
           {!aiCreating && (
             <Button onClick={() => setAiCreating(true)}>✨ AI course</Button>
           )}
@@ -242,6 +262,7 @@ export default function Dashboard() {
           <NewCourseForm onDone={() => setCreating(false)} />
         </Panel>
       )}
+      {planning && <PlanCoursePanel onDone={() => setPlanning(false)} />}
       {aiCreating && <GenerateCoursePanel onDone={() => setAiCreating(false)} />}
 
       {courses && courses.length === 0 && (
