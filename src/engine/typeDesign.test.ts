@@ -4,6 +4,7 @@ import {
   diffItemType,
   migrateFieldValues,
   pruneTemplateMap,
+  studyStatus,
   validateItemType,
 } from './typeDesign';
 import { parseRichText, richTextToPlain } from './richtext';
@@ -155,6 +156,26 @@ describe('field value conversion', () => {
     const next = [field('f1', 'Front', 'list'), field('f9', 'Extra')];
     const out = migrateFieldValues({ f1: 'a, b', f2: 'gone' }, prev, next);
     expect(out).toEqual({ f1: ['a', 'b'], f9: '' });
+  });
+});
+
+describe('studyStatus', () => {
+  const c = (...states: ('new' | 'review' | 'burned' | 'suspended')[]) =>
+    states.map((state) => ({ state }));
+
+  it('sends an active item back to lessons when it gains an untaught card', () => {
+    expect(studyStatus('active', c('review', 'new'))).toBe('lesson');
+    expect(studyStatus('active', c('review'))).toBe('active');
+  });
+
+  it('promotes a lesson item that has nothing left to teach', () => {
+    expect(studyStatus('lesson', c('review'))).toBe('active');
+    expect(studyStatus('lesson', c('new', 'review'))).toBe('lesson');
+  });
+
+  it('never touches locked items or items with no cards', () => {
+    expect(studyStatus('locked', c('review'))).toBe('locked');
+    expect(studyStatus('lesson', [])).toBe('lesson');
   });
 });
 

@@ -137,6 +137,16 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
             ),
           )
         )}
+        {!entry.cloze && prompts.length === 0 && (
+          <p className="text-sm text-amber-300/80">
+            This card has no prompt content — fill{' '}
+            {template.promptFieldIds
+              .map((id) => itemType.fields.find((f) => f.id === id)?.name)
+              .filter(Boolean)
+              .join(' / ') || 'its prompt field'}{' '}
+            in the item editor.
+          </p>
+        )}
         {hints.length > 0 && !graded && (
           <div className="mt-1 space-y-1">
             {hints.slice(0, hintsShown).map((h) => (

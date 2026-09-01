@@ -2,6 +2,7 @@ import { db } from '@/db/db';
 import type { Card, Course, Item, ItemStatus } from '@/engine/types';
 import type { Scheduler } from '@/engine/scheduler/types';
 import { computeStatuses, statusChanges, wouldCycle, type GateItem } from '@/engine/gating';
+import { studyStatus } from '@/engine/typeDesign';
 import { DEFAULT_PASS_PERCENT, levelProgress, shouldLevelUp } from '@/engine/levels';
 import { schedulerForCourse } from './schedulers';
 
@@ -203,13 +204,31 @@ export async function recomputeUnlocks(
       gateLevel({ ...course, currentLevel }),
     );
     const statusById = new Map(changes.map((c) => [c.id, c.to]));
+
+    // lesson-vs-active is card-derived, and gating can't see cards: an item
+    // sitting in the lesson queue with nothing new left to teach (or an active
+    // item holding an untaught card) is repaired here too.
+    const allCards = await db.cards.where('itemId').anyOf(refreshed.map((i) => i.id)).toArray();
+    const cardsByItem = new Map<string, Card[]>();
+    for (const c of allCards) {
+      if (c.isGhost) continue; // drills never define an item's lifecycle
+      const arr = cardsByItem.get(c.itemId) ?? [];
+      arr.push(c);
+      cardsByItem.set(c.itemId, arr);
+    }
+
     for (const item of refreshed) {
-      const status: ItemStatus | undefined = statusById.get(item.id);
+      const gated: ItemStatus = statusById.get(item.id) ?? item.status;
+      const status = studyStatus(gated, cardsByItem.get(item.id) ?? []);
       const updated = {
         ...item,
-        ...(status ? { status, unlockedAt: status === 'locked' ? null : (item.unlockedAt ?? now) } : {}),
+        status,
+        ...(status !== item.status
+          ? { unlockedAt: status === 'locked' ? null : (item.unlockedAt ?? now) }
+          : {}),
         updatedAt: now,
       };
+      if (status !== item.status && !statusById.has(item.id)) changed++;
       await db.items.put(updated);
     }
     return { changed: changed + changes.length };

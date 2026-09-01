@@ -13,8 +13,17 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
   Bunpro-like), hour-aligned due times, wrong answers drop stages by the real WK formula
 - **Prerequisite gating & levels**: items unlock only when their prerequisites *pass*
   (radical → kanji → vocab), and levels advance when enough of the level's gate items pass
+- **Item-type designer**: build your own content model per course — fields (text, rich text,
+  list, image, audio, cloze sentences) and card templates (what's prompted, what's typed, hints,
+  kana/latin, typo tolerance). Saving migrates every existing item, and the impact is spelled out
+  before you commit
+- **Item editor**: field values, mnemonics, prerequisites, per-template synonyms / block lists /
+  guidance answers, and manual SRS control — set any card's stage, suspend, burn, or send an item
+  back to lessons, all logged with the previous state and undoable in one click
+- **Images & audio**: picture prompts downscaled to 1024px and stored (with your backup) locally
 - **Typed reviews**: typo tolerance (Damerau-Levenshtein), synonyms, block lists, wrong-facet
-  shake, kana/kanji-aware input guards, and a built-in **kana IME** (type `moku` → もく)
+  shake, kana/kanji-aware input guards, progressive hints, and a built-in **kana IME**
+  (type `moku` → もく)
 - **Lessons**: batched study + quiz gate with a daily new-item limit
 - **Ghost reviews** (Bunpro-style): missed cards spawn short-cycle drill ghosts that graduate
   and vanish, without touching the parent card's schedule
