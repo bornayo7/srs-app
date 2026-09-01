@@ -14,8 +14,27 @@ import { aiConfigReady, getAiConfig, type AiConfig } from './config';
 
 export interface AiCallOpts {
   system: string;
+  /**
+   * Large, stable context (a course's source material) sent as a second
+   * system block. On Anthropic it carries a cache breakpoint, so repeated
+   * calls with the same material within the cache window pay a fraction for
+   * it; elsewhere it is simply appended to the system prompt.
+   */
+  cacheableSystem?: string;
   user: string;
   maxTokens: number;
+}
+
+function anthropicSystem(opts: AiCallOpts): string | Anthropic.TextBlockParam[] {
+  if (!opts.cacheableSystem) return opts.system;
+  return [
+    { type: 'text', text: opts.system },
+    { type: 'text', text: opts.cacheableSystem, cache_control: { type: 'ephemeral' } },
+  ];
+}
+
+function flatSystem(opts: AiCallOpts): string {
+  return opts.cacheableSystem ? `${opts.system}\n\n${opts.cacheableSystem}` : opts.system;
 }
 
 async function requireConfig(): Promise<AiConfig> {
@@ -45,7 +64,7 @@ async function anthropicObject<S extends z.ZodType>(
   const response = await client.messages.parse({
     model: cfg.anthropic.model,
     max_tokens: opts.maxTokens,
-    system: opts.system,
+    system: anthropicSystem(opts),
     messages: [{ role: 'user', content: opts.user }],
     output_config: { format: zodOutputFormat(schema) },
   });
@@ -63,7 +82,7 @@ async function anthropicText(cfg: AiConfig, opts: AiCallOpts): Promise<string> {
   const response = await client.messages.create({
     model: cfg.anthropic.model,
     max_tokens: opts.maxTokens,
-    system: opts.system,
+    system: anthropicSystem(opts),
     messages: [{ role: 'user', content: opts.user }],
   });
   if (response.stop_reason === 'refusal') {
@@ -129,7 +148,7 @@ async function openaiObject<S extends z.ZodType>(
   schema: S,
   opts: AiCallOpts,
 ): Promise<z.infer<S>> {
-  const system = `${opts.system}\nRespond with a SINGLE valid JSON object and nothing else.`;
+  const system = `${flatSystem(opts)}\nRespond with a SINGLE valid JSON object and nothing else.`;
   const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
     { role: 'system', content: system },
     { role: 'user', content: opts.user },
@@ -178,7 +197,7 @@ export async function aiGenerateText(opts: AiCallOpts): Promise<string> {
   return openaiChat(
     cfg,
     [
-      { role: 'system', content: opts.system },
+      { role: 'system', content: flatSystem(opts) },
       { role: 'user', content: opts.user },
     ],
     opts.maxTokens,
