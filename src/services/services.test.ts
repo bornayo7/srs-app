@@ -9,6 +9,8 @@ import { completeLessonBatch, lessonAvailability, nextLessonBatch } from './less
 import { undoReview } from './undo';
 import { exportAll } from '@/db/export';
 import { importAll } from '@/db/import';
+import { applyPacket } from '@/packages/importPacket';
+import { parsePacket } from '@/packages/schema';
 import { HOUR } from '@/engine/time';
 import type { Card, Course, Item } from '@/engine/types';
 
@@ -208,6 +210,42 @@ describe('backup round trip', () => {
     const after = await dump();
     expect(after).toEqual(before);
     expect((await db.courses.get(course.id))!.name).toBe('Test');
+  });
+
+  it('round-trips course plans and the proposal review queue', async () => {
+    await applyPacket(
+      parsePacket({
+        format: 'srs-packet',
+        version: 1,
+        kind: 'course-plan',
+        course: { name: 'Planned', releaseMode: 'manual' },
+        itemTypes: [
+          {
+            name: 'Fact',
+            fields: [{ name: 'Q' }, { name: 'A' }],
+            templates: [{ name: 'Recall', promptFields: ['Q'], answerField: 'A' }],
+          },
+        ],
+        units: [
+          { title: 'One', items: [{ fields: { Q: 'q1', A: 'a1' } }] },
+          { title: 'Two', releaseAt: '2026-10-01' },
+        ],
+        material: 'syllabus text',
+      }),
+      NOW,
+    );
+    const dumpPlans = async () => ({
+      plans: await db.plans.toCollection().sortBy('id'),
+      proposals: await db.proposals.toCollection().sortBy('id'),
+    });
+    const before = await dumpPlans();
+    expect(before.plans).toHaveLength(1);
+    expect(before.proposals).toHaveLength(1);
+
+    const backup = await exportAll(NOW + HOUR);
+    await Promise.all(db.tables.map((t) => t.clear()));
+    await importAll(JSON.parse(JSON.stringify(backup)));
+    expect(await dumpPlans()).toEqual(before);
   });
 
   it('rejects malformed backups without touching data', async () => {

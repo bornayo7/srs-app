@@ -107,6 +107,7 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
               .map((id) => types.find((t) => t.id === id)?.name)
               .filter((n): n is string => !!n),
             passPercent: course.levelConfig?.passPercent,
+            autoAdvance: course.levelConfig?.autoAdvance,
           }
         : {}),
     },

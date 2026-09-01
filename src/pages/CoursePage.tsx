@@ -698,7 +698,8 @@ function CourseSettings({ course, types }: { course: Course; types: ItemType[] }
                 ghosts,
                 levelMode,
                 ...(levelMode === 'levels'
-                  ? { levelConfig: { gateTypeIds, passPercent } }
+                  ? // spread keeps autoAdvance, which a plan's release mode owns
+                    { levelConfig: { ...course.levelConfig, gateTypeIds, passPercent } }
                   : {}),
               },
               now(),

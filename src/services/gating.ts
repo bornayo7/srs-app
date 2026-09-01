@@ -56,6 +56,15 @@ function gateLevel(course: Course): number {
   return course.levelMode === 'levels' ? course.currentLevel : Number.MAX_SAFE_INTEGER;
 }
 
+/**
+ * May the level engine advance this course on its own? A plan in manual or
+ * scheduled release mode turns this off so only its release action moves
+ * the level; passing items still unlock their dependents as usual.
+ */
+export function autoAdvances(course: Course): boolean {
+  return course.levelConfig?.autoAdvance ?? true;
+}
+
 function gateTypeFilter(course: Course): (item: Item) => boolean {
   const ids = course.levelConfig?.gateTypeIds ?? [];
   if (ids.length === 0) return () => true; // no explicit gate types → every type counts
@@ -110,7 +119,7 @@ export async function applyGatingAfterReview(
   const unlockedItemIds = await unlockNewlyEligible(course, now, dependents, passedIds);
 
   let leveledUpTo: number | null = null;
-  if (course.levelMode === 'levels') {
+  if (course.levelMode === 'levels' && autoAdvances(course)) {
     const isGate = gateTypeFilter(course);
     const passPercent = course.levelConfig?.passPercent ?? DEFAULT_PASS_PERCENT;
     let working = { ...course };
@@ -183,7 +192,7 @@ export async function recomputeUnlocks(
     // threshold (e.g. narrowing gate types), so re-run the level cascade here;
     // applyGatingAfterReview can't help because those items already passed.
     let currentLevel = course.currentLevel;
-    if (course.levelMode === 'levels') {
+    if (course.levelMode === 'levels' && autoAdvances(course)) {
       const isGate = gateTypeFilter(course);
       const passPercent = course.levelConfig?.passPercent ?? DEFAULT_PASS_PERCENT;
       const passedIds = new Set(refreshed.filter((i) => i.passedAt !== null).map((i) => i.id));

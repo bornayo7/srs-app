@@ -397,10 +397,18 @@ function AnkiPanel({
 }
 
 function packetSummary(packet: Packet): string {
-  if (packet.kind === 'create-course') {
-    return `New course “${packet.course.name}” — ${packet.itemTypes.length} type(s), ${packet.items.length} item(s)`;
+  switch (packet.kind) {
+    case 'create-course':
+      return `New course “${packet.course.name}” — ${packet.itemTypes.length} type(s), ${packet.items.length} item(s)`;
+    case 'add-items':
+      return `Add ${packet.items.length} item(s) to ${packet.courseName ?? packet.courseId ?? '?'}`;
+    case 'course-plan': {
+      const proposed = packet.units.reduce((sum, u) => sum + (u.items?.length ?? 0), 0);
+      return `New planned course “${packet.course.name}” — ${packet.units.length} unit(s), ${proposed} item(s) to review`;
+    }
+    case 'propose-items':
+      return `${packet.items.length} item(s) to review for ${packet.courseName ?? packet.courseId ?? '?'}`;
   }
-  return `Add ${packet.items.length} item(s) to ${packet.courseName ?? packet.courseId ?? '?'}`;
 }
 
 export default function InboxPage() {
@@ -455,7 +463,12 @@ export default function InboxPage() {
     try {
       const res = await applyPacket(packet, now());
       const warn = res.warnings.length > 0 ? ` (${res.warnings.join(' ')})` : '';
-      say(`✅ ${sourceName}: imported ${res.itemsAdded} item(s) into “${res.courseName}”.${warn}`);
+      // review-queue kinds park items instead of teaching them
+      const outcome =
+        res.proposalsAdded > 0
+          ? `queued ${res.proposalsAdded} item(s) for review in`
+          : `imported ${res.itemsAdded} item(s) into`;
+      say(`✅ ${sourceName}: ${outcome} “${res.courseName}”.${warn}`);
       if (handle && fileName) {
         try {
           await archivePacket(handle, fileName);
