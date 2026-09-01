@@ -355,3 +355,42 @@ describe('recomputeUnlocks', () => {
     expect(after.map((i) => i.status).sort()).toEqual(before.map((i) => i.status).sort());
   });
 });
+
+describe('autoAdvance', () => {
+  it('false holds the level when the gate passes; dependents still unlock; true resumes', async () => {
+    const courseId = await install();
+    const seeded = (await db.courses.get(courseId))!;
+    await db.courses.put({
+      ...seeded,
+      levelConfig: { ...seeded.levelConfig!, autoAdvance: false },
+    });
+    const items = await itemsOf(courseId);
+    const types = await db.itemTypes.where('courseId').equals(courseId).toArray();
+    const kanjiTypeId = types.find((t) => t.name === 'Kanji')!.id;
+    const vocabTypeId = types.find((t) => t.name === 'Vocab')!.id;
+    const l1Kanji = items.filter((i) => i.typeId === kanjiTypeId && i.level === 1);
+
+    let t = NOW;
+    for (const kanji of l1Kanji) {
+      for (const prereqId of kanji.prereqIds) t = await passItem(prereqId, t);
+      t = await passItem(kanji.id, t);
+    }
+    // every level-1 kanji passed, but a plan owns the level
+    expect((await db.courses.get(courseId))!.currentLevel).toBe(1);
+    // the repair path honours the same flag
+    await recomputeUnlocks(courseId, t + HOUR);
+    expect((await db.courses.get(courseId))!.currentLevel).toBe(1);
+    // prerequisite unlocks are unaffected: level-1 vocab behind those kanji opened
+    const l1Vocab = (await itemsOf(courseId)).filter(
+      (i) => i.typeId === vocabTypeId && i.level === 1,
+    );
+    expect(l1Vocab.length).toBeGreaterThan(0);
+    expect(l1Vocab.every((i) => i.status !== 'locked')).toBe(true);
+
+    // switching it back on lets the already-satisfied threshold advance
+    const held = (await db.courses.get(courseId))!;
+    await db.courses.put({ ...held, levelConfig: { ...held.levelConfig!, autoAdvance: true } });
+    await recomputeUnlocks(courseId, t + 2 * HOUR);
+    expect((await db.courses.get(courseId))!.currentLevel).toBe(2);
+  });
+});

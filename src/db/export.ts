@@ -26,6 +26,8 @@ export interface BackupFile {
     meta: unknown[];
     captures?: unknown[];
     media?: unknown[];
+    plans?: unknown[]; // P4
+    proposals?: unknown[]; // P4
   };
 }
 
@@ -56,7 +58,18 @@ export async function exportAll(now: number): Promise<BackupFile> {
   );
   return db.transaction(
     'r',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta, db.captures],
+    [
+      db.courses,
+      db.ladders,
+      db.itemTypes,
+      db.items,
+      db.cards,
+      db.reviewLogs,
+      db.meta,
+      db.captures,
+      db.plans,
+      db.proposals,
+    ],
     async () => ({
       app: 'srs-app' as const,
       formatVersion: EXPORT_FORMAT_VERSION,
@@ -71,6 +84,8 @@ export async function exportAll(now: number): Promise<BackupFile> {
         meta: (await db.meta.toArray()).filter((row) => !NON_EXPORTABLE_META_KEYS.has(row.key)),
         captures: await db.captures.toArray(),
         media,
+        plans: await db.plans.toArray(),
+        proposals: await db.proposals.toArray(),
       },
     }),
   );

@@ -3,10 +3,12 @@ import type {
   Capture,
   Card,
   Course,
+  CoursePlan,
   Item,
   ItemType,
   MediaAsset,
   MetaRow,
+  Proposal,
   ReviewLog,
   SrsLadder,
 } from '@/engine/types';
@@ -22,6 +24,8 @@ export class SrsDB extends Dexie {
   media!: Table<MediaAsset, string>;
   meta!: Table<MetaRow, string>;
   captures!: Table<Capture, string>;
+  plans!: Table<CoursePlan, string>;
+  proposals!: Table<Proposal, string>;
 
   constructor(name = 'srs-app') {
     super(name);
@@ -38,6 +42,11 @@ export class SrsDB extends Dexie {
     // v2: quick-capture inbox (additive — never edit past versions)
     this.version(2).stores({
       captures: 'id, createdAt',
+    });
+    // v3: progressive course plans + the AI proposal review queue (additive)
+    this.version(3).stores({
+      plans: 'id, courseId',
+      proposals: 'id, courseId, planId, [courseId+status], [courseId+level+status]',
     });
   }
 }

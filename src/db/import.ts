@@ -128,6 +128,29 @@ const media = z.object({
   data: z.string(), // base64
 });
 
+const planUnit = z
+  .object({ level: z.number().int().min(1), title: z.string() })
+  .catchall(z.unknown());
+
+const plan = z
+  .object({
+    id: z.string(),
+    courseId: z.string(),
+    releaseMode: z.enum(['progress', 'schedule', 'manual']),
+    units: z.array(planUnit),
+  })
+  .catchall(z.unknown());
+
+const proposal = z
+  .object({
+    id: z.string(),
+    courseId: z.string(),
+    level: z.number(),
+    status: z.enum(['pending', 'accepted', 'rejected']),
+    item: z.object({ fields: z.record(z.string(), z.unknown()) }).catchall(z.unknown()),
+  })
+  .catchall(z.unknown());
+
 export const backupSchema = z.object({
   app: z.literal('srs-app'),
   formatVersion: z.literal(EXPORT_FORMAT_VERSION),
@@ -142,6 +165,8 @@ export const backupSchema = z.object({
     meta: z.array(metaRow),
     captures: z.array(capture).optional(), // added in schema v2 backups
     media: z.array(media).optional(), // added when P3 introduced image fields
+    plans: z.array(plan).optional(), // P4 course plans
+    proposals: z.array(proposal).optional(), // P4 review queue
   }),
 });
 
@@ -185,6 +210,8 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
       db.meta,
       db.captures,
       db.media,
+      db.plans,
+      db.proposals,
     ],
     async () => {
       // backups exclude these on purpose — carry them across the wipe
@@ -201,6 +228,8 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
         db.meta.clear(),
         db.captures.clear(),
         db.media.clear(),
+        db.plans.clear(),
+        db.proposals.clear(),
       ]);
       await db.meta.bulkPut(localOnly);
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -214,6 +243,8 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
       await db.meta.bulkPut(parsed.data.meta as any[]);
       if (parsed.data.captures) await db.captures.bulkAdd(parsed.data.captures as any[]);
       if (mediaRows.length > 0) await db.media.bulkAdd(mediaRows);
+      if (parsed.data.plans) await db.plans.bulkAdd(parsed.data.plans as any[]);
+      if (parsed.data.proposals) await db.proposals.bulkAdd(parsed.data.proposals as any[]);
       /* eslint-enable @typescript-eslint/no-explicit-any */
     },
   );

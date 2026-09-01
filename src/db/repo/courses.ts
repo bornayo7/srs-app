@@ -53,7 +53,17 @@ export async function updateCourse(course: Course, now: number): Promise<void> {
 export async function deleteCourse(courseId: string): Promise<void> {
   await db.transaction(
     'rw',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta],
+    [
+      db.courses,
+      db.ladders,
+      db.itemTypes,
+      db.items,
+      db.cards,
+      db.reviewLogs,
+      db.meta,
+      db.plans,
+      db.proposals,
+    ],
     async () => {
       // clear seed markers pointing at this course so samples can reinstall
       const seedRows = await db.meta.where('key').startsWith('seed:').toArray();
@@ -73,6 +83,8 @@ export async function deleteCourse(courseId: string): Promise<void> {
         .where('[courseId+ts]')
         .between([courseId, Dexie.minKey], [courseId, Dexie.maxKey])
         .delete();
+      await db.proposals.where('courseId').equals(courseId).delete();
+      await db.plans.where('courseId').equals(courseId).delete();
       await db.courses.delete(courseId);
     },
   );
