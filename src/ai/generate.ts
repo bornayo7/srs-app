@@ -53,14 +53,14 @@ const generatedCourseSchema = z.object({
   items: z.array(generatedItem).min(1),
 });
 
-type GeneratedItem = z.infer<typeof generatedItem>;
+export type GeneratedItem = z.infer<typeof generatedItem>;
 
 /**
  * Convert a generated item to a packet item. Alternates attach as synonyms
  * ONLY to templates whose answer field is that specific field — never to every
  * template, which would defeat wrong-facet grading on multi-template types.
  */
-function toPacketItem(
+export function toPacketItem(
   gi: GeneratedItem,
   templatesByAnswerField: Map<string, string[]>,
   typeName?: string,
@@ -83,7 +83,7 @@ function toPacketItem(
   };
 }
 
-function describeType(itemType: ItemType): string {
+export function describeType(itemType: ItemType): string {
   const fields = itemType.fields.map((f) => `"${f.name}" (${f.kind})`).join(', ');
   const templates = itemType.templates
     .map((t) => {
@@ -95,7 +95,7 @@ function describeType(itemType: ItemType): string {
   return `Item type "${itemType.name}" — fields: ${fields}. Quiz templates — ${templates}.`;
 }
 
-const ANSWER_RULES = `Rules for good SRS items:
+export const ANSWER_RULES = `Rules for good SRS items:
 - Answers are TYPED by the user: keep every answer field short (1-4 words), unambiguous, lowercase unless casing matters.
 - If a template's answer language is "kana", write that answer field in hiragana/katakana only.
 - The prompt fields must uniquely determine the answer — no trick questions.
