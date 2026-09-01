@@ -47,6 +47,13 @@ export const packetTemplateSchema = z.object({
   name: z.string().min(1),
   promptFields: z.array(z.string()).min(1),
   answerField: z.string().min(1),
+  /**
+   * 'typed' (default) asks the learner to type the answer; 'choice' shows
+   * buttons, with the wrong options taken from other items of the same type.
+   */
+  mode: z.enum(['typed', 'choice']).optional(),
+  /** Options shown in 'choice' mode, 2–6 (default 4). */
+  choices: z.number().int().min(2).max(6).optional(),
   answerLang: z.enum(['latin', 'kana']).optional(), // default latin
   typoTolerance: z.boolean().optional(), // default true
 });

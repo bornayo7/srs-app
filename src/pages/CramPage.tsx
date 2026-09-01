@@ -7,14 +7,15 @@ import { matchTypedAnswer } from '@/engine/grading/match';
 import { mulberry32, seededShuffle } from '@/engine/queue';
 import { DAY } from '@/engine/time';
 import {
-  entryAnswerLang,
   entryMatchContext,
+  withChoices,
   withClozePick,
   type Feedback,
   type SessionEntry,
 } from '@/stores/sessionStore';
+import { newChoiceCache } from '@/services/choices';
 import { CardPrompt } from '@/components/review/CardPrompt';
-import { TypedInput } from '@/components/review/TypedInput';
+import { AnswerInput } from '@/components/review/AnswerInput';
 import { Badge, Button } from '@/components/ui';
 import { now } from '@/services/clock';
 
@@ -89,13 +90,15 @@ export default function CramPage() {
         .map((t) => [t.id, t]),
     );
     const seed = Date.now() & 0x7fffffff;
+    const cache = newChoiceCache();
     const entries: SessionEntry[] = [];
     for (const card of pool) {
       const item = items.get(card.itemId);
       const itemType = item && types.get(item.typeId);
       const template = itemType?.templates.find((t) => t.id === card.templateId);
       if (item && itemType && template) {
-        entries.push(withClozePick({ card, item, itemType, template }, seed + entries.length));
+        const s = seed + entries.length;
+        entries.push(await withChoices(withClozePick({ card, item, itemType, template }, s), s, cache));
       }
     }
     const shuffled = seededShuffle(entries, mulberry32(seed));
@@ -156,10 +159,10 @@ export default function CramPage() {
       </div>
       <CardPrompt key={entry.card.id} entry={entry} feedback={feedback} />
       <div className="mt-5">
-        <TypedInput
+        <AnswerInput
           key={entry.card.id}
+          entry={entry}
           feedback={feedback}
-          answerLang={entryAnswerLang(entry)}
           onSubmit={(text) => {
             const ctx = entryMatchContext(entry);
             const v = matchTypedAnswer(text, ctx);

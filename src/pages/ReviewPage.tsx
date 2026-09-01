@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { entryAnswerLang, useSession } from '@/stores/sessionStore';
+import { useSession } from '@/stores/sessionStore';
 import { CardPrompt } from '@/components/review/CardPrompt';
-import { TypedInput } from '@/components/review/TypedInput';
+import { AnswerInput } from '@/components/review/AnswerInput';
 import { SessionSummary } from '@/components/review/SessionSummary';
 import { Button } from '@/components/ui';
 import { useCourse, useCourseLadder } from '@/hooks/useCourseData';
@@ -97,10 +97,10 @@ export default function ReviewPage() {
       <div className="mt-5">
         {/* key remounts (and clears) the input whenever the front card changes,
             including undo-after-advance restoring a different card */}
-        <TypedInput
+        <AnswerInput
           key={entry.card.id}
+          entry={entry}
           feedback={s.feedback}
-          answerLang={entryAnswerLang(entry)}
           onSubmit={(text) => void s.submit(text)}
           onContinue={s.continueNext}
         />

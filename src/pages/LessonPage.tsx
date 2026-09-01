@@ -5,11 +5,12 @@ import type { Item, ItemType } from '@/engine/types';
 import { matchTypedAnswer } from '@/engine/grading/match';
 import { isClozeSentences, revealBlank } from '@/engine/grading/cloze';
 import {
-  entryAnswerLang,
   entryMatchContext,
+  withChoices,
   withClozePick,
   type SessionEntry,
 } from '@/stores/sessionStore';
+import { newChoiceCache } from '@/services/choices';
 import { seededShuffle, mulberry32 } from '@/engine/queue';
 import { newId } from '@/engine/ids';
 import { completeLessonBatch, lessonAvailability, nextLessonBatch } from '@/services/lessons';
@@ -21,7 +22,7 @@ import { Button, Badge } from '@/components/ui';
 import { MediaAudio, MediaImage } from '@/components/MediaImage';
 import { RichText } from '@/components/RichText';
 import { richTextToPlain } from '@/engine/richtext';
-import { TypedInput } from '@/components/review/TypedInput';
+import { AnswerInput } from '@/components/review/AnswerInput';
 import { CardPrompt } from '@/components/review/CardPrompt';
 import type { Feedback } from '@/stores/sessionStore';
 
@@ -77,6 +78,7 @@ export default function LessonPage() {
 
   async function startQuiz(items: Item[], types: Map<string, ItemType>) {
     const seed = Date.now() & 0x7fffffff;
+    const cache = newChoiceCache();
     const entries: SessionEntry[] = [];
     for (const item of items) {
       const itemType = types.get(item.typeId);
@@ -86,8 +88,9 @@ export default function LessonPage() {
         // skip cards whose template no longer exists on the type
         const template = itemType.templates.find((t) => t.id === card.templateId);
         if (card.state === 'new' && template) {
+          const s = seed + entries.length;
           entries.push(
-            withClozePick({ card, item, itemType, template }, seed + entries.length),
+            await withChoices(withClozePick({ card, item, itemType, template }, s), s, cache),
           );
         }
       }
@@ -296,10 +299,10 @@ export default function LessonPage() {
       </div>
       <CardPrompt key={entry.card.id} entry={entry} feedback={feedback} />
       <div className="mt-5">
-        <TypedInput
+        <AnswerInput
           key={entry.card.id}
+          entry={entry}
           feedback={feedback}
-          answerLang={entryAnswerLang(entry)}
           onSubmit={(text) => {
             const ctx = entryMatchContext(entry);
             const v = matchTypedAnswer(text, ctx);

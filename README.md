@@ -24,6 +24,10 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
 - **Typed reviews**: typo tolerance (Damerau-Levenshtein), synonyms, block lists, wrong-facet
   shake, kana/kanji-aware input guards, progressive hints, and a built-in **kana IME**
   (type `moku` → もく)
+- **Multiple choice**: any template can be answered by clicking (or pressing 1–6) instead of
+  typing. Wrong options are drawn from sibling items at a similar level and are checked against
+  the real grading pipeline first, so a "wrong" option can never be a synonym or a typo-range
+  twin of the answer. Correct answers commit exactly like a typed one
 - **Lessons**: batched study + quiz gate with a daily new-item limit
 - **Ghost reviews** (Bunpro-style): missed cards spawn short-cycle drill ghosts that graduate
   and vanish, without touching the parent card's schedule

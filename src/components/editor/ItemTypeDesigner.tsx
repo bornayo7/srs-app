@@ -3,6 +3,12 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/db/db';
 import { Badge, Button, Field, Modal, Panel, Select, TextInput } from '@/components/ui';
 import { newId } from '@/engine/ids';
+import {
+  clampChoiceCount,
+  DEFAULT_CHOICE_COUNT,
+  MAX_CHOICE_OPTIONS,
+  MIN_CHOICE_OPTIONS,
+} from '@/engine/grading/choice';
 import { diffItemType, validateItemType } from '@/engine/typeDesign';
 import type { CardTemplate, Course, FieldDef, ItemType } from '@/engine/types';
 import {
@@ -378,6 +384,7 @@ function TemplateEditor({
   toggleId: (list: string[], id: string) => string[];
 }) {
   const clozeFields = fields.filter((f) => f.kind === 'clozeSentences');
+  const answerName = fields.find((f) => f.id === template.answerFieldId)?.name;
   return (
     <div className="rounded-lg border border-slate-800 p-3">
       <div className="mb-2 flex items-center gap-2">
@@ -398,14 +405,36 @@ function TemplateEditor({
                       sentencesFieldId: clozeFields[0]?.id ?? '',
                       rotation: 'random',
                     }
-                  : { mode: 'typed', answerLang: 'latin', typoTolerance: true },
+                  : mode === 'choice'
+                    ? { mode: 'choice', choices: DEFAULT_CHOICE_COUNT }
+                    : { mode: 'typed', answerLang: 'latin', typoTolerance: true },
             });
           }}
           title="How this card is answered"
         >
           <option value="typed">typed answer</option>
+          <option value="choice">multiple choice</option>
           <option value="sentenceCloze">sentence cloze</option>
         </Select>
+        {template.grading.mode === 'choice' && (
+          <>
+            <TextInput
+              type="number"
+              min={MIN_CHOICE_OPTIONS}
+              max={MAX_CHOICE_OPTIONS}
+              value={template.grading.choices}
+              onChange={(e) =>
+                onChange({ grading: { mode: 'choice', choices: clampChoiceCount(+e.target.value) } })
+              }
+              className="max-w-20"
+              title="How many options to show (2–6)"
+            />
+            <span className="text-[11px] text-slate-500">
+              options — wrong ones come from other {answerName ? `"${answerName}"` : 'answer'} values
+              of this type
+            </span>
+          </>
+        )}
         {template.grading.mode === 'typed' && (
           <>
             <Select
