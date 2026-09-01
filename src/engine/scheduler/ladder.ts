@@ -13,17 +13,22 @@ import { floorToHour, minutesToMs } from '../time';
  *
  * A burned card is represented as stageIndex === stages.length.
  */
+/**
+ * When a card sitting at `stageIndex` becomes due. Hour-floored (WK behavior)
+ * — but never floored into the past: a custom sub-hour stage (e.g. 30m) must
+ * keep its real delay. Shared with manual stage setting.
+ */
+export function dueForStage(ladder: SrsLadder, stageIndex: number, now: number): number {
+  const stage = ladder.stages[Math.min(Math.max(0, stageIndex), ladder.stages.length - 1)];
+  const target = now + minutesToMs(stage.intervalMinutes);
+  const floored = floorToHour(target);
+  return floored > now ? floored : target;
+}
+
 export function makeLadderScheduler(ladder: SrsLadder): Scheduler {
   const top = ladder.stages.length;
 
-  function dueFor(stageIndex: number, now: number): number {
-    const stage = ladder.stages[stageIndex];
-    const target = now + minutesToMs(stage.intervalMinutes);
-    const floored = floorToHour(target);
-    // Hour-floor (WK behavior) — but never floor into the past: a custom
-    // sub-hour stage (e.g. 30m) must keep its real delay.
-    return floored > now ? floored : target;
-  }
+  const dueFor = (stageIndex: number, now: number) => dueForStage(ladder, stageIndex, now);
 
   return {
     kind: 'ladder',

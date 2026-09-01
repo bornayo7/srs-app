@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import type { SessionEntry, Feedback } from '@/stores/sessionStore';
 import type { FieldValue } from '@/engine/types';
 import { speak, stopSpeaking, ttsSupported } from '@/services/tts';
+import { MediaAudio, MediaImage } from '@/components/MediaImage';
+import { RichText } from '@/components/RichText';
+import { richTextToPlain } from '@/engine/richtext';
 
 function fieldText(v: FieldValue | undefined): string {
   if (v === undefined) return '';
@@ -14,21 +17,54 @@ function fieldText(v: FieldValue | undefined): string {
 export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback: Feedback | null }) {
   const { item, itemType, template } = entry;
   const [showTranslation, setShowTranslation] = useState(false);
+  const [hintsShown, setHintsShown] = useState(0);
   // stop any in-flight speech when the card unmounts (next card / navigation)
   useEffect(() => stopSpeaking, []);
+
   const prompts = template.promptFieldIds
-    .map((id) => ({
-      name: itemType.fields.find((f) => f.id === id)?.name ?? '',
-      value: fieldText(item.fieldValues[id]),
-    }))
+    .map((id) => {
+      const field = itemType.fields.find((f) => f.id === id);
+      return {
+        id,
+        name: field?.name ?? '',
+        kind: field?.kind ?? 'text',
+        value: fieldText(item.fieldValues[id]),
+      };
+    })
     .filter((p) => p.value);
+
+  const hints = template.hintFieldIds
+    .map((id) => {
+      const field = itemType.fields.find((f) => f.id === id);
+      return { id, name: field?.name ?? '', value: fieldText(item.fieldValues[id]) };
+    })
+    .filter((h) => h.value);
+
+  // Alt+H, because the answer box has focus and a bare "h" would be typed
+  useEffect(() => {
+    if (hints.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey && e.key.toLowerCase() === 'h') {
+        e.preventDefault();
+        setHintsShown((n) => Math.min(n + 1, hints.length));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hints.length]);
+
   const graded = feedback?.kind === 'correct' || feedback?.kind === 'incorrect';
   // what the 🔊 button reads: the full sentence once graded, gap before; else the prompt
   const speakText = entry.cloze
     ? graded
       ? entry.cloze.masked.replace(/＿+/g, entry.cloze.blank)
       : entry.cloze.masked
-    : prompts.map((p) => p.value).join('. ');
+    : richTextToPlain(
+        prompts
+          .filter((p) => p.kind !== 'image' && p.kind !== 'audio')
+          .map((p) => p.value)
+          .join('. '),
+      );
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-xl">
@@ -89,11 +125,37 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
             )}
           </>
         ) : (
-          prompts.map((p) => (
-            <div key={p.name}>
-              <div className="text-3xl font-semibold leading-snug text-slate-50">{p.value}</div>
-            </div>
-          ))
+          prompts.map((p) =>
+            p.kind === 'image' ? (
+              <MediaImage key={p.id} id={p.value} alt={p.name} className="max-h-56" />
+            ) : p.kind === 'audio' ? (
+              <MediaAudio key={p.id} id={p.value} />
+            ) : (
+              <div key={p.id}>
+                <div className="text-3xl font-semibold leading-snug text-slate-50">{p.value}</div>
+              </div>
+            ),
+          )
+        )}
+        {hints.length > 0 && !graded && (
+          <div className="mt-1 space-y-1">
+            {hints.slice(0, hintsShown).map((h) => (
+              <p key={h.id} className="text-sm text-slate-400">
+                <span className="mr-1 text-[10px] uppercase tracking-widest text-slate-600">
+                  {h.name}
+                </span>
+                {h.value}
+              </p>
+            ))}
+            {hintsShown < hints.length && (
+              <button
+                className="text-xs text-slate-500 underline decoration-dotted hover:text-slate-300"
+                onClick={() => setHintsShown(hintsShown + 1)}
+              >
+                {hintsShown === 0 ? 'show a hint' : 'another hint'} (Alt+H)
+              </button>
+            )}
+          </div>
         )}
       </div>
       {feedback?.kind === 'incorrect' && (
@@ -104,7 +166,11 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
               <span className="text-rose-300/70"> (+{feedback.accepted.length - 1} accepted)</span>
             )}
           </span>
-          {item.note && <p className="mt-1 text-xs text-rose-200/70">{item.note}</p>}
+          {item.note && (
+            <p className="mt-1 text-xs text-rose-200/70">
+              <RichText src={item.note} />
+            </p>
+          )}
         </div>
       )}
       {feedback?.kind === 'correct' && feedback.typo && (

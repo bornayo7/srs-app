@@ -44,8 +44,14 @@ export function buildMatchContext(
 /** First text-ish field value — used as the item's display name in lists. */
 export function itemPreview(item: Item, itemType: ItemType): string {
   for (const f of itemType.fields) {
+    // image/audio values are media ids — showing one as a name is worse than nothing
+    if (f.kind === 'image' || f.kind === 'audio') continue;
     const vals = asStrings(item.fieldValues[f.id]);
     if (vals.length > 0) return vals.join(', ');
   }
+  const media = itemType.fields.find(
+    (f) => (f.kind === 'image' || f.kind === 'audio') && item.fieldValues[f.id],
+  );
+  if (media) return media.kind === 'image' ? '🖼️ (image)' : '🔊 (audio)';
   return '(empty)';
 }

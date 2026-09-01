@@ -1,7 +1,8 @@
 import { db } from '../db';
 import { newId } from '@/engine/ids';
-import { initialStatusFor } from '@/engine/gating';
+import { initialStatusFor, wouldCycle } from '@/engine/gating';
 import { recomputeUnlocks } from '@/services/gating';
+import { collectMediaIds, deleteOrphanMedia } from '@/services/media';
 import type { Card, FieldValue, Item, ItemType } from '@/engine/types';
 
 export interface CreateItemInput {
@@ -76,8 +77,68 @@ export async function updateItem(item: Item, now: number): Promise<void> {
   await db.items.put({ ...item, updatedAt: now });
 }
 
+/** The fields the item editor owns. Everything else is derived state. */
+export interface ItemEdit {
+  id: string;
+  fieldValues: Record<string, FieldValue>;
+  prereqIds: string[];
+  level: number;
+  synonyms: Record<string, string[]>;
+  blockList: Record<string, string[]>;
+  guidance: Item['guidance'];
+  note: string;
+}
+
+/**
+ * The item editor's save path: validates the prerequisite edges (a cycle would
+ * lock both items forever), writes the item, frees media it no longer points
+ * at, and re-settles gating because level/prereq edits change what's unlocked.
+ *
+ * Only the editable fields are taken from the caller — status, passedAt and
+ * card-derived state are re-read here, so a long-open editor can't resurrect
+ * stale progress (the SRS tab writes to the same item while it's open).
+ */
+export async function saveItemEdit(edit: ItemEdit, now: number): Promise<void> {
+  const prev = await db.items.get(edit.id);
+  if (!prev) throw new Error('item not found');
+
+  const prereqIds = [...new Set(edit.prereqIds.filter((id) => id && id !== edit.id))];
+  const siblings = (await db.items.where('courseId').equals(prev.courseId).toArray()).filter(
+    (i) => i.id !== edit.id,
+  );
+  const known = new Set(siblings.map((i) => i.id));
+  const missing = prereqIds.filter((id) => !known.has(id));
+  if (missing.length > 0) throw new Error('a selected prerequisite no longer exists');
+  if (wouldCycle(siblings, edit.id, prereqIds)) {
+    throw new Error('those prerequisites form a loop — the items would lock each other forever');
+  }
+
+  const next: Item = {
+    ...prev,
+    fieldValues: edit.fieldValues,
+    synonyms: edit.synonyms,
+    blockList: edit.blockList,
+    guidance: edit.guidance,
+    note: edit.note,
+    prereqIds,
+    level: Math.max(1, edit.level),
+    updatedAt: now,
+  };
+  await db.items.put(next);
+
+  const itemType = await db.itemTypes.get(prev.typeId);
+  if (itemType) {
+    const before = collectMediaIds(prev, itemType);
+    const after = new Set(collectMediaIds(next, itemType));
+    await deleteOrphanMedia(before.filter((id) => !after.has(id)));
+  }
+  await recomputeUnlocks(prev.courseId, now);
+}
+
 export async function deleteItem(itemId: string, now = Date.now()): Promise<void> {
   const item = await db.items.get(itemId);
+  const itemType = item ? await db.itemTypes.get(item.typeId) : undefined;
+  const mediaIds = item && itemType ? collectMediaIds(item, itemType) : [];
   await db.transaction('rw', [db.items, db.cards, db.reviewLogs], async () => {
     const cardIds = await db.cards.where('itemId').equals(itemId).primaryKeys();
     if (cardIds.length > 0) await db.reviewLogs.where('cardId').anyOf(cardIds).delete();
@@ -96,6 +157,7 @@ export async function deleteItem(itemId: string, now = Date.now()): Promise<void
   // resettle after the transaction commits — recomputeUnlocks opens its own
   // (wider) transaction, which Dexie forbids nesting inside a narrower one
   if (item) await recomputeUnlocks(item.courseId, now);
+  await deleteOrphanMedia(mediaIds);
 }
 
 /** Items waiting in the lesson pool for a course, oldest first within a level. */

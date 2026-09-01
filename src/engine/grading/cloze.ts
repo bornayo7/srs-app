@@ -119,6 +119,11 @@ export function parseClozeLines(raw: string): { sentences: ClozeSentence[]; erro
   return { sentences, error: null };
 }
 
+/** Inverse of parseClozeLines — renders stored sentences back into the editor. */
+export function formatClozeLines(sentences: ClozeSentence[]): string {
+  return sentences.map((s) => (s.translation ? `${s.text} :: ${s.translation}` : s.text)).join('\n');
+}
+
 /** Compact display text for previews/snapshots. */
 export function clozeSummary(v: ClozeSentence[]): string {
   return v.map((s) => revealBlank(s.text)).join(' / ');

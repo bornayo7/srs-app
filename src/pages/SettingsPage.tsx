@@ -18,6 +18,37 @@ import {
   type AiProvider,
 } from '@/ai/config';
 import { aiErrorMessage, testConnection } from '@/ai/client';
+import { formatBytes } from '@/engine/image';
+import { mediaUsage, purgeOrphanMedia } from '@/services/media';
+
+/** Images and audio held in IndexedDB, with a sweep for abandoned uploads. */
+function MediaUsage() {
+  const [usage, setUsage] = useState<{ count: number; bytes: number } | null>(null);
+  const [status, setStatus] = useState('');
+  useEffect(() => {
+    void mediaUsage().then(setUsage);
+  }, [status]);
+
+  if (!usage || usage.count === 0) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-slate-800 pt-3">
+      <span className="text-sm text-slate-300">
+        🖼️ {usage.count} media file{usage.count === 1 ? '' : 's'} · {formatBytes(usage.bytes)}
+      </span>
+      <Button
+        title="Delete stored images and audio that no item references any more"
+        onClick={async () => {
+          const removed = await purgeOrphanMedia();
+          setStatus(removed === 0 ? 'Nothing unused.' : `Freed ${removed} file(s).`);
+        }}
+      >
+        Clean up unused
+      </Button>
+      {status && <span className="text-xs text-slate-400">{status}</span>}
+      <span className="text-xs text-slate-500">Included in backups (base64).</span>
+    </div>
+  );
+}
 
 function AiPanel() {
   const [provider, setProviderState] = useState<AiProvider>('anthropic');
@@ -318,6 +349,7 @@ export default function SettingsPage() {
             </Button>
           )}
         </div>
+        <MediaUsage />
       </Panel>
 
       <TimeTravelPanel />
