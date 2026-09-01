@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { db, ensurePresets } from './db';
-import type { BackupFile } from './export';
+import type { BackupFile, ExportedMedia } from './export';
 import { EXPORT_FORMAT_VERSION } from './export';
+import { base64ToBlob } from './blobCodec';
 
 // Validation is deliberately structural (ids + relationships + the fields the
 // engine depends on), with catchall passthrough so forward-compatible extras
@@ -119,6 +120,14 @@ const capture = z
   .object({ id: z.string(), text: z.string(), createdAt: z.number() })
   .catchall(z.unknown());
 
+const media = z.object({
+  id: z.string(),
+  mimeType: z.string(),
+  name: z.string(),
+  createdAt: z.number(),
+  data: z.string(), // base64
+});
+
 export const backupSchema = z.object({
   app: z.literal('srs-app'),
   formatVersion: z.literal(EXPORT_FORMAT_VERSION),
@@ -132,6 +141,7 @@ export const backupSchema = z.object({
     reviewLogs: z.array(reviewLog),
     meta: z.array(metaRow),
     captures: z.array(capture).optional(), // added in schema v2 backups
+    media: z.array(media).optional(), // added when P3 introduced image fields
   }),
 });
 
@@ -153,9 +163,29 @@ const LOCAL_ONLY_META_KEYS = [
 export async function importAll(raw: unknown): Promise<{ courses: number; items: number }> {
   const parsed = backupSchema.parse(raw) as unknown as BackupFile;
 
+  // decode media before the transaction: base64→Blob is synchronous, but doing
+  // it up front means a corrupt asset fails the import instead of half-applying
+  const mediaRows = ((parsed.data.media ?? []) as ExportedMedia[]).map((m) => ({
+    id: m.id,
+    blob: base64ToBlob(m.data, m.mimeType),
+    mimeType: m.mimeType,
+    name: m.name,
+    createdAt: m.createdAt,
+  }));
+
   await db.transaction(
     'rw',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta, db.captures],
+    [
+      db.courses,
+      db.ladders,
+      db.itemTypes,
+      db.items,
+      db.cards,
+      db.reviewLogs,
+      db.meta,
+      db.captures,
+      db.media,
+    ],
     async () => {
       // backups exclude these on purpose — carry them across the wipe
       const localOnly = (await db.meta.bulkGet(LOCAL_ONLY_META_KEYS)).filter(
@@ -170,6 +200,7 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
         db.reviewLogs.clear(),
         db.meta.clear(),
         db.captures.clear(),
+        db.media.clear(),
       ]);
       await db.meta.bulkPut(localOnly);
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -182,6 +213,7 @@ export async function importAll(raw: unknown): Promise<{ courses: number; items:
       // bulkPut, not bulkAdd: keys may overlap the preserved local-only rows
       await db.meta.bulkPut(parsed.data.meta as any[]);
       if (parsed.data.captures) await db.captures.bulkAdd(parsed.data.captures as any[]);
+      if (mediaRows.length > 0) await db.media.bulkAdd(mediaRows);
       /* eslint-enable @typescript-eslint/no-explicit-any */
     },
   );

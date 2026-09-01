@@ -18,6 +18,9 @@ import { requestPersistentStorage } from '@/db/db';
 import { maybeRefreshSnapshot } from '@/exchange/exchange';
 import { speak, stopSpeaking, ttsSupported } from '@/services/tts';
 import { Button, Badge } from '@/components/ui';
+import { MediaAudio, MediaImage } from '@/components/MediaImage';
+import { RichText } from '@/components/RichText';
+import { richTextToPlain } from '@/engine/richtext';
 import { TypedInput } from '@/components/review/TypedInput';
 import { CardPrompt } from '@/components/review/CardPrompt';
 import type { Feedback } from '@/stores/sessionStore';
@@ -213,18 +216,34 @@ export default function LessonPage() {
               const text =
                 typeof v === 'string' ? v : Array.isArray(v) ? (v as string[]).join(', ') : '';
               if (!text) return null;
+              if (f.kind === 'image' || f.kind === 'audio') {
+                return (
+                  <div key={f.id}>
+                    <div className="text-[10px] uppercase tracking-widest text-slate-500">
+                      {f.name}
+                    </div>
+                    {f.kind === 'image' ? (
+                      <MediaImage id={text} alt={f.name} className="max-h-56" />
+                    ) : (
+                      <MediaAudio id={text} />
+                    )}
+                  </div>
+                );
+              }
               return (
                 <div key={f.id}>
                   <div className="text-[10px] uppercase tracking-widest text-slate-500">
                     {f.name}
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="text-2xl font-semibold text-slate-50">{text}</div>
+                    <div className="text-2xl font-semibold text-slate-50">
+                      {f.kind === 'richtext' ? <RichText src={text} /> : text}
+                    </div>
                     {ttsSupported() && (
                       <button
                         className="rounded bg-slate-800 px-1.5 py-0.5 text-xs hover:bg-slate-700"
                         title="Read aloud"
-                        onClick={() => speak(text)}
+                        onClick={() => speak(richTextToPlain(text))}
                       >
                         🔊
                       </button>
@@ -236,7 +255,7 @@ export default function LessonPage() {
             {item.note && (
               <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
                 <span className="mr-1 text-xs uppercase tracking-widest text-slate-500">note</span>
-                {item.note}
+                <RichText src={item.note} />
               </div>
             )}
           </div>

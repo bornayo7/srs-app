@@ -7,8 +7,8 @@ import { Badge, Button, Panel, TextInput } from '@/components/ui';
 import { useCourse, useCourseLadder } from '@/hooks/useCourseData';
 import { useNowTick } from '@/hooks/useNowTick';
 import { itemPreview } from '@/engine/grading/context';
-import { parseClozeLines } from '@/engine/grading/cloze';
 import { DEFAULT_PASS_PERCENT } from '@/engine/levels';
+import { isMediaKind } from '@/engine/typeDesign';
 import { formatDuration, HOUR, minutesToMs } from '@/engine/time';
 import { courseGatingSummary, courseLevelProgress, recomputeUnlocks } from '@/services/gating';
 import type { Card, Course, FieldValue, Item, ItemType, SrsLadder } from '@/engine/types';
@@ -22,6 +22,9 @@ import { generateMnemonic } from '@/ai/generate';
 import { aiErrorMessage } from '@/ai/client';
 import { useAiReady } from '@/hooks/useAiReady';
 import { exportCoursePackage, downloadPackage } from '@/packages/exportPackage';
+import { ItemTypeDesigner } from '@/components/editor/ItemTypeDesigner';
+import { ItemEditorButton } from '@/components/editor/ItemEditor';
+import { FieldValueInput } from '@/components/editor/FieldValueInput';
 
 function stageBadge(ladder: SrsLadder | null, card: Card | undefined, t: number) {
   if (!card) return null;
@@ -167,6 +170,7 @@ function ItemsPanel({
                     {mnemonicBusy === item.id ? '…' : '✨'}
                   </Button>
                 )}
+                <ItemEditorButton item={item} itemType={ty} course={course} ladder={ladder} />
                 <Button
                   variant="ghost"
                   onClick={() => {
@@ -188,7 +192,7 @@ function ItemsPanel({
 
 function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
   const [typeId, setTypeId] = useState(types[0]?.id ?? '');
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, FieldValue>>({});
   const [synonyms, setSynonyms] = useState('');
   const [note, setNote] = useState('');
   // default to the level the course is actually on, so new items aren't
@@ -196,6 +200,9 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
   const [level, setLevel] = useState(course.currentLevel);
   const [prereqIds, setPrereqIds] = useState<string[]>([]);
   const [formError, setFormError] = useState('');
+  // bumped after each add so field inputs holding their own draft text
+  // (cloze, rich text, media) start empty for the next item
+  const [resetKey, setResetKey] = useState(0);
   const existing = useLiveQuery(
     () => db.items.where('courseId').equals(course.id).toArray(),
     [course.id],
@@ -211,22 +218,18 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
         onSubmit={async (e) => {
           e.preventDefault();
           setFormError('');
-          const missing = ty.fields.some((f) => !(values[f.id] ?? '').trim());
-          if (missing) return;
-          // cloze fields are typed as text and parsed line-by-line
+          const isEmpty = (v: FieldValue | undefined) =>
+            v === undefined || (typeof v === 'string' ? !v.trim() : v.length === 0);
+          // media is optional; every content field must be filled
+          const blank = ty.fields.find((f) => !isMediaKind(f.kind) && isEmpty(values[f.id]));
+          if (blank) {
+            setFormError(`${blank.name} is empty.`);
+            return;
+          }
           const fieldValues: Record<string, FieldValue> = {};
           for (const f of ty.fields) {
-            const raw = (values[f.id] ?? '').trim();
-            if (f.kind === 'clozeSentences') {
-              const { sentences, error } = parseClozeLines(raw);
-              if (error) {
-                setFormError(`${f.name}: ${error}`);
-                return;
-              }
-              fieldValues[f.id] = sentences;
-            } else {
-              fieldValues[f.id] = raw;
-            }
+            const v = values[f.id];
+            fieldValues[f.id] = typeof v === 'string' ? v.trim() : (v ?? '');
           }
           const syns = synonyms
             .split(',')
@@ -250,6 +253,7 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
           setSynonyms('');
           setNote('');
           setPrereqIds([]);
+          setResetKey(resetKey + 1);
         }}
       >
         {types.length > 1 && (
@@ -266,30 +270,21 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
           </select>
         )}
         <div className="grid gap-2 sm:grid-cols-2">
-          {ty.fields.map((f) =>
-            f.kind === 'clozeSentences' ? (
-              <label key={f.id} className="block sm:col-span-2">
-                <span className="mb-1 block text-xs text-slate-400">
-                  {f.name} — one sentence per line, blank in ⟦brackets⟧, optional "&nbsp;:: translation"
-                </span>
-                <textarea
-                  value={values[f.id] ?? ''}
-                  onChange={(e) => setValues({ ...values, [f.id]: e.target.value })}
-                  rows={3}
-                  placeholder={'The cat sat ⟦on⟧ the mat. :: translation here\nHang ⟦on⟧ a second!'}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-violet-500"
-                />
-              </label>
-            ) : (
-              <label key={f.id} className="block">
-                <span className="mb-1 block text-xs text-slate-400">{f.name}</span>
-                <TextInput
-                  value={values[f.id] ?? ''}
-                  onChange={(e) => setValues({ ...values, [f.id]: e.target.value })}
-                />
-              </label>
-            ),
-          )}
+          {ty.fields.map((f) => (
+            <label
+              key={f.id}
+              className={`block ${f.kind === 'clozeSentences' || f.kind === 'richtext' ? 'sm:col-span-2' : ''}`}
+            >
+              <span className="mb-1 block text-xs text-slate-400">{f.name}</span>
+              <FieldValueInput
+                key={`${f.id}:${resetKey}`}
+                field={f}
+                value={values[f.id]}
+                onChange={(v) => setValues({ ...values, [f.id]: v })}
+                onError={(msg) => setFormError(msg ? `${f.name}: ${msg}` : '')}
+              />
+            </label>
+          ))}
         </div>
         {formError && <p className="text-sm text-rose-300">{formError}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
@@ -793,6 +788,7 @@ export default function CoursePage() {
       <ItemsPanel course={course} types={types} ladder={ladder ?? null} />
       <AddItemForm course={course} types={types} />
       <GenerateItemsPanel courseId={course.id} types={types} />
+      <ItemTypeDesigner course={course} types={types} />
       {ladder && <LadderEditor key={ladder.updatedAt} ladder={ladder} />}
       <CourseSettings course={course} types={types} />
       <p className="text-xs text-slate-600">

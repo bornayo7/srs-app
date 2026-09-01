@@ -1,4 +1,5 @@
 import { db } from './db';
+import { blobToBase64 } from './blobCodec';
 
 export const EXPORT_FORMAT_VERSION = 1;
 
@@ -24,11 +25,35 @@ export interface BackupFile {
     reviewLogs: unknown[];
     meta: unknown[];
     captures?: unknown[];
+    media?: unknown[];
   };
 }
 
-/** Full-database JSON backup (media blobs excluded until P3 moves backups to zip). */
+/** One media asset, base64-inlined so a backup stays a single JSON file. */
+export interface ExportedMedia {
+  id: string;
+  mimeType: string;
+  name: string;
+  createdAt: number;
+  data: string; // base64
+}
+
+/**
+ * Full-database JSON backup. Media blobs are base64-inlined — they're
+ * downscaled on ingest, so this stays reasonable at personal scale.
+ */
 export async function exportAll(now: number): Promise<BackupFile> {
+  // encode outside the transaction: awaiting blob.arrayBuffer() inside a Dexie
+  // transaction would let it commit out from under us
+  const media: ExportedMedia[] = await Promise.all(
+    (await db.media.toArray()).map(async (m) => ({
+      id: m.id,
+      mimeType: m.mimeType,
+      name: m.name,
+      createdAt: m.createdAt,
+      data: await blobToBase64(m.blob),
+    })),
+  );
   return db.transaction(
     'r',
     [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.reviewLogs, db.meta, db.captures],
@@ -45,6 +70,7 @@ export async function exportAll(now: number): Promise<BackupFile> {
         reviewLogs: await db.reviewLogs.toArray(),
         meta: (await db.meta.toArray()).filter((row) => !NON_EXPORTABLE_META_KEYS.has(row.key)),
         captures: await db.captures.toArray(),
+        media,
       },
     }),
   );

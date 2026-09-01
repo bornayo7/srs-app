@@ -55,6 +55,8 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
       if (!itemType) return null;
       const fields: PacketItem['fields'] = {};
       for (const f of itemType.fields) {
+        // media values are local ids — meaningless in a shared packet
+        if (f.kind === 'image' || f.kind === 'audio') continue;
         const v = item.fieldValues[f.id];
         if (typeof v === 'string' && v) fields[f.name] = v;
         else if (isClozeSentences(v)) fields[f.name] = v;
@@ -112,6 +114,8 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
       name: t.name,
       icon: t.icon,
       color: t.color,
+      // media fields still get declared (as empty text) so templates that
+      // prompt on them keep resolving — only their local ids are dropped
       fields: t.fields.map((f) => ({
         name: f.name,
         kind:
