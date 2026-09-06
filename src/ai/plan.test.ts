@@ -354,6 +354,30 @@ describe('generateUnitItems', () => {
     expect((await db.items.get(accepted.itemIds[0]))!.prereqIds).toEqual([membraneItemId]);
   });
 
+  it('tells the model what is still awaiting review, so "draft more" does not repeat it', async () => {
+    const courseId = await plannedCourse();
+    const term = (value: string) => ({
+      type: 'Term',
+      key: '',
+      prereqs: [],
+      fields: [
+        { name: 'Term', value, alternates: [] },
+        { name: 'Definition', value: `about ${value}`, alternates: [] },
+      ],
+      note: '',
+    });
+    mockedAi.mockResolvedValueOnce({ items: [term('ribosome')] });
+    await generateUnitItems(courseId, 1, {}, NOW + 1);
+    // nothing reviewed yet — the learner just presses "Draft more"
+    mockedAi.mockResolvedValueOnce({ items: [term('nucleus')] });
+    await generateUnitItems(courseId, 1, {}, NOW + 2);
+
+    const user = mockedAi.mock.calls[1][1].user;
+    expect(user).toMatch(/awaiting the learner's review[^\n]*\n[^\n]*ribosome/);
+    expect(user).not.toMatch(/Already in the course/); // it is not an item yet
+    expect(user).not.toMatch(/REJECTED/);
+  });
+
   it('unitRequest omits empty sections and caps the lists', () => {
     const types: ItemType[] = [];
     const text = unitRequest(

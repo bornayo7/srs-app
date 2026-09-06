@@ -17,7 +17,8 @@ import { ANSWER_RULES, describeType, toPacketItem } from './generate';
  *      + item types) for review. No items yet.
  *   2. generateUnitItems — items for ONE unit, on demand, into the review
  *      queue. Sends the material again (cached on Anthropic) plus what's
- *      already accepted (don't duplicate) and rejected (avoid similar).
+ *      already accepted and what still awaits review (don't duplicate either)
+ *      and what was rejected (avoid similar).
  * Small calls, reviewable steps, and a rerun costs one unit — not the course.
  */
 
@@ -282,15 +283,21 @@ function proposalLabel(p: Proposal): string {
 }
 
 const MAX_EXISTING_IN_PROMPT = 150;
+const MAX_PENDING_IN_PROMPT = 60;
 const MAX_REJECTED_IN_PROMPT = 40;
 
-/** The per-unit request: what to write, what exists, what was turned down. Pure. */
+/**
+ * The per-unit request: what to write, what exists, what is still waiting
+ * for the learner, what was turned down. Pure.
+ */
 export function unitRequest(
   unit: PlanUnit,
   count: number,
   context: {
     existing: { item: { fieldValues: Record<string, unknown>; typeId: string }; key?: string }[];
     types: ItemType[];
+    /** Drafted earlier and not yet reviewed — "draft more" must not repeat them. */
+    pending?: Proposal[];
     rejected: Proposal[];
     instruction?: string;
   },
@@ -304,6 +311,7 @@ export function unitRequest(
       return preview ? `${key ? `[${key}] ` : ''}${preview}` : '';
     })
     .filter(Boolean);
+  const pendingLines = (context.pending ?? []).slice(0, MAX_PENDING_IN_PROMPT).map(proposalLabel);
   const rejectedLines = context.rejected
     .slice(0, MAX_REJECTED_IN_PROMPT)
     .map((p) => `${proposalLabel(p)}${p.rejectReason ? ` — "${p.rejectReason}"` : ''}`);
@@ -313,6 +321,9 @@ export function unitRequest(
     unit.topics.length > 0 ? `Topics to cover: ${unit.topics.join('; ')}` : '',
     existingLines.length > 0
       ? `Already in the course — do NOT duplicate these (a [key] may be used as a prerequisite):\n${existingLines.join(' | ')}`
+      : '',
+    pendingLines.length > 0
+      ? `Already drafted and awaiting the learner's review — do NOT duplicate these either:\n${pendingLines.join(' | ')}`
       : '',
     rejectedLines.length > 0
       ? `The learner REJECTED these earlier — avoid anything similar:\n${rejectedLines.join('\n')}`
@@ -362,6 +373,7 @@ export async function generateUnitItems(
     user: unitRequest(unit, count, {
       existing: items.map((item) => ({ item, key: keyByItemId.get(item.id) })),
       types,
+      pending: proposals.filter((p) => p.status === 'pending'),
       rejected: proposals.filter((p) => p.status === 'rejected'),
       instruction: opts.instruction,
     }),
