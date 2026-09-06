@@ -408,3 +408,42 @@ describe('item editor save path', () => {
     expect(after.status).toBe('locked'); // now waiting on A
   });
 });
+
+describe('manual stage changes keep the lesson queue honest', () => {
+  it('setting every card to a stage takes the item out of the lesson queue', async () => {
+    const { course, type } = await setup();
+    const a = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, 'A', 'a') },
+      NOW,
+    );
+    expect((await db.items.get(a.id))!.status).toBe('lesson');
+
+    await setItemStage(a.id, 1, NOW);
+    expect((await db.items.get(a.id))!.status).toBe('active');
+    expect(await nextLessonBatch(course.id, NOW)).toEqual([]);
+  });
+
+  it('a two-card item stays in lessons while one card is still untaught', async () => {
+    const { course, type } = await setup(twoCardSpec());
+    const item = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, '水', 'water', 'mizu') },
+      NOW,
+    );
+    const [meaning] = await cardsOf(item.id);
+    await setCardManual(meaning.id, { kind: 'setStage', stageIndex: 2 }, NOW);
+    expect((await db.items.get(item.id))!.status).toBe('lesson');
+  });
+
+  it('resetting one card of an active item sends it back to lessons', async () => {
+    const { course, type } = await setup(twoCardSpec());
+    const item = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, '水', 'water', 'mizu') },
+      NOW,
+    );
+    await completeLessonBatch([item.id], 'sess', NOW);
+    expect((await db.items.get(item.id))!.status).toBe('active');
+    const [meaning] = await cardsOf(item.id);
+    await setCardManual(meaning.id, { kind: 'reset' }, NOW + 1);
+    expect((await db.items.get(item.id))!.status).toBe('lesson');
+  });
+});

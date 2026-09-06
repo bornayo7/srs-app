@@ -2,6 +2,7 @@ import Dexie from 'dexie';
 import { db } from '@/db/db';
 import { newId } from '@/engine/ids';
 import { dueForStage } from '@/engine/scheduler/ladder';
+import { studyStatus } from '@/engine/typeDesign';
 import type { Card, CardSnapshot, ReviewLog, SrsLadder } from '@/engine/types';
 import { applyGatingAfterReview, recomputeUnlocks, type GatingOutcome } from './gating';
 
@@ -160,13 +161,26 @@ async function manualUpdate(
       for (const itemId of itemIds) {
         const item = await db.items.get(itemId);
         if (!item) continue;
-        if (opts.clearPassed && item.passedAt !== null) {
-          await db.items.put({ ...item, passedAt: null, updatedAt: now });
-          continue;
+        // lesson ⇄ active follows what the item's real cards now hold: cards
+        // set to a stage leave nothing to teach, a reset card must be taught
+        // again — otherwise the item would sit in the wrong queue
+        const realCards = (await db.cards.where('itemId').equals(itemId).toArray()).filter(
+          (c) => !c.isGhost,
+        );
+        const status = studyStatus(item.status, realCards);
+        const unpass = opts.clearPassed && item.passedAt !== null;
+        if (status !== item.status || unpass) {
+          await db.items.put({
+            ...item,
+            status,
+            ...(unpass ? { passedAt: null } : {}),
+            updatedAt: now,
+          });
         }
+        if (opts.clearPassed) continue; // recomputeUnlocks re-settles the graph after commit
         const course = await db.courses.get(item.courseId);
         // promoting a card can complete an item — unlock its dependents now
-        if (course && !opts.clearPassed) {
+        if (course) {
           const outcome = await applyGatingAfterReview(course, itemId, now);
           if (outcome.itemPassed) gating = outcome;
         }
