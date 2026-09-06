@@ -1,4 +1,4 @@
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router';
+import { BrowserRouter, Link, NavLink, Route, Routes } from 'react-router';
 import Dashboard from '@/pages/Dashboard';
 import CoursePage from '@/pages/CoursePage';
 import LessonPage from '@/pages/LessonPage';
@@ -8,6 +8,19 @@ import InboxPage from '@/pages/InboxPage';
 import CramPage from '@/pages/CramPage';
 import StatsPage from '@/pages/StatsPage';
 import PlanPage from '@/pages/PlanPage';
+
+/** A mistyped or stale URL used to render an empty main area with no way back. */
+function NotFound() {
+  return (
+    <div className="py-16 text-center">
+      <div className="text-4xl">🧭</div>
+      <p className="mt-2 text-slate-300">There's nothing at this address.</p>
+      <Link to="/" className="mt-4 inline-block text-sm text-violet-300 hover:underline">
+        Back to the dashboard
+      </Link>
+    </div>
+  );
+}
 
 export default function App() {
   return (
@@ -65,6 +78,7 @@ export default function App() {
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/inbox" element={<InboxPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
       </div>
