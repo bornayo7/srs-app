@@ -25,6 +25,7 @@ import { exportCoursePackage, downloadPackage } from '@/packages/exportPackage';
 import { ItemTypeDesigner } from '@/components/editor/ItemTypeDesigner';
 import { ItemEditorButton } from '@/components/editor/ItemEditor';
 import { FieldValueInput } from '@/components/editor/FieldValueInput';
+import { splitList } from '@/components/editor/ListInput';
 
 function stageBadge(ladder: SrsLadder | null, card: Card | undefined, t: number) {
   if (!card) return null;
@@ -193,7 +194,8 @@ function ItemsPanel({
 function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
   const [typeId, setTypeId] = useState(types[0]?.id ?? '');
   const [values, setValues] = useState<Record<string, FieldValue>>({});
-  const [synonyms, setSynonyms] = useState('');
+  // keyed by template id — a meaning synonym must never count as a reading answer
+  const [synonyms, setSynonyms] = useState<Record<string, string>>({});
   const [note, setNote] = useState('');
   // default to the level the course is actually on, so new items aren't
   // accidentally created locked behind a level the user has already passed
@@ -231,12 +233,11 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
             const v = values[f.id];
             fieldValues[f.id] = typeof v === 'string' ? v.trim() : (v ?? '');
           }
-          const syns = synonyms
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean);
           const synMap: Record<string, string[]> = {};
-          if (syns.length > 0) for (const tpl of ty.templates) synMap[tpl.id] = syns;
+          for (const tpl of ty.templates) {
+            const list = splitList(synonyms[tpl.id] ?? '');
+            if (list.length > 0) synMap[tpl.id] = list;
+          }
           await createItem(
             {
               courseId: ty.courseId,
@@ -250,7 +251,7 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
             now(),
           );
           setValues({});
-          setSynonyms('');
+          setSynonyms({});
           setNote('');
           setPrereqIds([]);
           setResetKey(resetKey + 1);
@@ -259,7 +260,10 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
         {types.length > 1 && (
           <select
             value={typeId}
-            onChange={(e) => setTypeId(e.target.value)}
+            onChange={(e) => {
+              setTypeId(e.target.value);
+              setSynonyms({}); // keyed by the previous type's templates
+            }}
             className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
           >
             {types.map((x) => (
@@ -288,12 +292,19 @@ function AddItemForm({ course, types }: { course: Course; types: ItemType[] }) {
         </div>
         {formError && <p className="text-sm text-rose-300">{formError}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
-          <label className="block">
-            <span className="mb-1 block text-xs text-slate-400">
-              Extra accepted answers (comma-separated)
-            </span>
-            <TextInput value={synonyms} onChange={(e) => setSynonyms(e.target.value)} />
-          </label>
+          {ty.templates.map((tpl) => (
+            <label key={tpl.id} className="block">
+              <span className="mb-1 block text-xs text-slate-400">
+                {ty.templates.length > 1
+                  ? `Also accept for “${tpl.name}” (comma-separated)`
+                  : 'Extra accepted answers (comma-separated)'}
+              </span>
+              <TextInput
+                value={synonyms[tpl.id] ?? ''}
+                onChange={(e) => setSynonyms({ ...synonyms, [tpl.id]: e.target.value })}
+              />
+            </label>
+          ))}
           <label className="block">
             <span className="mb-1 block text-xs text-slate-400">Note / mnemonic</span>
             <TextInput value={note} onChange={(e) => setNote(e.target.value)} />
