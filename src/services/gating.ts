@@ -1,7 +1,7 @@
 import { db } from '@/db/db';
 import type { Card, Course, Item, ItemStatus } from '@/engine/types';
 import type { Scheduler } from '@/engine/scheduler/types';
-import { computeStatuses, statusChanges, wouldCycle, type GateItem } from '@/engine/gating';
+import { computeStatuses, statusChanges, type GateItem } from '@/engine/gating';
 import { studyStatus } from '@/engine/typeDesign';
 import { DEFAULT_PASS_PERCENT, levelProgress, shouldLevelUp } from '@/engine/levels';
 import { schedulerForCourse } from './schedulers';
@@ -156,19 +156,32 @@ export async function recomputeUnlocks(
     const itemIds = new Set(items.map((i) => i.id));
 
     // Pass 1 — drop edges that can never be satisfied: references to deleted
-    // items, self-references, and any edge that closes a cycle (corrupt data;
-    // both directions go, since either alone would still be arbitrary).
+    // items, self-references, and any edge that closes a cycle. Items are
+    // walked in order and only the edge that completes a cycle is cut, so a
+    // two-item loop loses one direction (which one depends on item order —
+    // it is corrupt data, any choice is arbitrary) and the rest of the graph
+    // keeps as much of the author's intent as possible.
     const cleanedPrereqs = new Map<string, string[]>(
       items.map((i) => [i.id, i.prereqIds.filter((id) => itemIds.has(id) && id !== i.id)]),
     );
-    const gateView = (): GateItem[] =>
-      items.map((i) => ({ ...toGateItem(i), prereqIds: cleanedPrereqs.get(i.id) ?? [] }));
+    // can `target` be reached from `from` along prerequisite edges?
+    const reaches = (from: string, target: string): boolean => {
+      const seen = new Set<string>();
+      const stack = [from];
+      while (stack.length > 0) {
+        const id = stack.pop()!;
+        if (id === target) return true;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        stack.push(...(cleanedPrereqs.get(id) ?? []));
+      }
+      return false;
+    };
     for (const item of items) {
-      const kept = (cleanedPrereqs.get(item.id) ?? []).filter((id) => {
-        const others = gateView().filter((g) => g.id !== item.id);
-        return !wouldCycle(others, item.id, [id]);
-      });
-      cleanedPrereqs.set(item.id, kept);
+      cleanedPrereqs.set(
+        item.id,
+        (cleanedPrereqs.get(item.id) ?? []).filter((id) => !reaches(id, item.id)),
+      );
     }
 
     let changed = 0;
