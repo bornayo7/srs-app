@@ -322,8 +322,8 @@ export default function SettingsPage() {
           {message && <span className="text-sm text-slate-400">{message}</span>}
         </div>
         <p className="mt-2 text-xs text-slate-500">
-          Your SRS history is years of investment — export regularly. Media files will join the
-          backup when images land in a later phase.
+          Your SRS history is years of investment — export regularly. Images and audio are
+          included (base64), so a media-heavy course makes a bigger file.
         </p>
       </Panel>
 

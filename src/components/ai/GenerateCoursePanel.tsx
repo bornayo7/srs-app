@@ -39,11 +39,11 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
     return (
       <Panel title="✨ AI course">
         <p className="text-sm text-slate-400">
-          Add your Anthropic API key in{' '}
+          Add an API key (Anthropic or any OpenAI-compatible provider) in{' '}
           <Link to="/settings" className="text-violet-300 hover:underline">
             Settings → AI
           </Link>{' '}
-          to have Claude design a complete course from a description.
+          to have the AI design a complete course from a description.
         </p>
       </Panel>
     );

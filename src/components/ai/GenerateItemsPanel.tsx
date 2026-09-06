@@ -48,7 +48,7 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
     return (
       <Panel title="✨ Generate items with AI">
         <p className="text-sm text-slate-400">
-          Add your Anthropic API key in{' '}
+          Add an API key (Anthropic or any OpenAI-compatible provider) in{' '}
           <Link to="/settings" className="text-violet-300 hover:underline">
             Settings → AI
           </Link>{' '}

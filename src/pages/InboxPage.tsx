@@ -638,7 +638,7 @@ export default function InboxPage() {
             }}
           />
           <span className="text-xs text-slate-500">
-            Accepts srs-packet files (create-course or add-items).
+            Accepts srs-packet files (create-course, add-items, course-plan, propose-items).
           </span>
         </div>
       </Panel>
