@@ -45,7 +45,8 @@ async function decode(file: Blob): Promise<ImageBitmap> {
 /**
  * Store an image, downscaled to fit MAX_IMAGE_DIM and re-encoded as WebP.
  * Keeps the original bytes when re-encoding would not actually save anything
- * (already-small images, or formats WebP loses to).
+ * (already-small images, or formats WebP loses to) or would lose content
+ * (vector SVG, possibly-animated GIF).
  */
 export async function ingestImage(file: File, now: number): Promise<MediaAsset> {
   if (!file.type.startsWith('image/')) throw new Error(`${file.name} is not an image`);
@@ -55,8 +56,9 @@ export async function ingestImage(file: File, now: number): Promise<MediaAsset> 
 
   let blob: Blob = file;
   let mimeType = file.type;
-  // SVG is already tiny and vector — rasterizing it would only lose quality
-  if (file.type !== 'image/svg+xml') {
+  // SVG is already tiny and vector — rasterizing it would only lose quality;
+  // a GIF may be animated, and a re-encode keeps only its first frame
+  if (file.type !== 'image/svg+xml' && file.type !== 'image/gif') {
     try {
       const bitmap = await decode(file);
       const size = fitWithin(bitmap.width, bitmap.height, MAX_IMAGE_DIM);
