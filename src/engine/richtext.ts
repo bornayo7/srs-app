@@ -35,10 +35,13 @@ function classify(chunk: string): RichToken {
 /** Parse into lines of tokens. Never throws; unmatched markers stay literal. */
 export function parseRichText(src: string): RichToken[][] {
   return src.split('\n').map((line) =>
-    line
-      .split(TOKEN_RE)
-      .filter((chunk) => chunk !== '' && chunk !== undefined)
-      .map(classify),
+    // split() with one capture group alternates text, match, text, match…
+    // Only the matches are classified: a plain chunk that merely starts and
+    // ends with a marker ("* 3 *", a lone "`") must stay literal text.
+    line.split(TOKEN_RE).flatMap((chunk, i) => {
+      if (!chunk) return [];
+      return [i % 2 === 1 ? classify(chunk) : { kind: 'text' as const, text: chunk }];
+    }),
   );
 }
 
