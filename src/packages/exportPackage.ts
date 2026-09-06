@@ -1,6 +1,7 @@
 import { db } from '@/db/db';
 import { isClozeSentences } from '@/engine/grading/cloze';
 import type { Item } from '@/engine/types';
+import { downloadBlob } from '@/services/download';
 import type { CreateCoursePacket, PacketItem } from './schema';
 import { PACKET_FORMAT, PACKET_VERSION } from './schema';
 
@@ -143,11 +144,8 @@ export async function exportCoursePackage(courseId: string): Promise<CreateCours
 }
 
 export function downloadPackage(packet: CreateCoursePacket): void {
-  const blob = new Blob([JSON.stringify(packet, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${packet.course.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.srs-course.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(
+    new Blob([JSON.stringify(packet, null, 2)], { type: 'application/json' }),
+    `${packet.course.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.srs-course.json`,
+  );
 }

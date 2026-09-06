@@ -1,5 +1,6 @@
 import { db } from './db';
 import { blobToBase64 } from './blobCodec';
+import { downloadBlob } from '@/services/download';
 
 export const EXPORT_FORMAT_VERSION = 1;
 
@@ -92,12 +93,9 @@ export async function exportAll(now: number): Promise<BackupFile> {
 }
 
 export function downloadBackup(backup: BackupFile): void {
-  const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
   const stamp = new Date(backup.exportedAt).toISOString().slice(0, 10);
-  a.href = url;
-  a.download = `srs-backup-${stamp}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(
+    new Blob([JSON.stringify(backup)], { type: 'application/json' }),
+    `srs-backup-${stamp}.json`,
+  );
 }
