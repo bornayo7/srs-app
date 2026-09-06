@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Button, TextArea, TextInput } from '@/components/ui';
 import { MediaAudio, MediaImage } from '@/components/MediaImage';
 import { RichText, RICHTEXT_HELP } from '@/components/RichText';
+import { ListInput } from './ListInput';
 import { formatClozeLines, isClozeSentences, parseClozeLines } from '@/engine/grading/cloze';
 import type { FieldDef, FieldValue } from '@/engine/types';
 import { ingestAudio, ingestImage } from '@/services/media';
@@ -22,17 +23,10 @@ export function FieldValueInput({
   switch (field.kind) {
     case 'list':
       return (
-        <TextInput
-          value={Array.isArray(value) && !isClozeSentences(value) ? (value as string[]).join(', ') : ''}
+        <ListInput
+          value={Array.isArray(value) && !isClozeSentences(value) ? (value as string[]) : []}
           placeholder="one, two, three"
-          onChange={(e) =>
-            onChange(
-              e.target.value
-                .split(',')
-                .map((s) => s.trim())
-                .filter(Boolean),
-            )
-          }
+          onChange={onChange}
         />
       );
 

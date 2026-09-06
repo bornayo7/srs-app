@@ -4,6 +4,7 @@ import { db } from '@/db/db';
 import { Button, Field, Modal, TextArea, TextInput } from '@/components/ui';
 import { RichText, RICHTEXT_HELP } from '@/components/RichText';
 import { FieldValueInput } from './FieldValueInput';
+import { ListInput } from './ListInput';
 import { SrsControls } from './SrsControls';
 import { itemPreview } from '@/engine/grading/context';
 import type { Course, GuidanceAnswer, Item, ItemType, SrsLadder } from '@/engine/types';
@@ -51,20 +52,8 @@ export function ItemEditor({
   const typeById = new Map((types ?? []).map((t) => [t.id, t]));
 
   const patch = (over: Partial<Item>) => setDraft({ ...draft, ...over });
-  const setTemplateList = (
-    key: 'synonyms' | 'blockList',
-    templateId: string,
-    raw: string,
-  ) =>
-    patch({
-      [key]: {
-        ...draft[key],
-        [templateId]: raw
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
-      },
-    } as Partial<Item>);
+  const setTemplateList = (key: 'synonyms' | 'blockList', templateId: string, list: string[]) =>
+    patch({ [key]: { ...draft[key], [templateId]: list } } as Partial<Item>);
 
   const setGuidance = (templateId: string, list: GuidanceAnswer[]) =>
     patch({ guidance: { ...draft.guidance, [templateId]: list } });
@@ -256,18 +245,18 @@ export function ItemEditor({
                     label="Also accept (synonyms)"
                     hint="Comma-separated. Graded exactly like the real answer."
                   >
-                    <TextInput
-                      value={(draft.synonyms[tpl.id] ?? []).join(', ')}
-                      onChange={(e) => setTemplateList('synonyms', tpl.id, e.target.value)}
+                    <ListInput
+                      value={draft.synonyms[tpl.id] ?? []}
+                      onChange={(list) => setTemplateList('synonyms', tpl.id, list)}
                     />
                   </Field>
                   <Field
                     label="Never accept (block list)"
                     hint="Beats typo tolerance — for near-misses that mean something else."
                   >
-                    <TextInput
-                      value={(draft.blockList[tpl.id] ?? []).join(', ')}
-                      onChange={(e) => setTemplateList('blockList', tpl.id, e.target.value)}
+                    <ListInput
+                      value={draft.blockList[tpl.id] ?? []}
+                      onChange={(list) => setTemplateList('blockList', tpl.id, list)}
                     />
                   </Field>
                 </div>
