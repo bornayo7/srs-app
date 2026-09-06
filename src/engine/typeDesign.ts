@@ -70,6 +70,13 @@ export function validateItemType(type: ItemType): TypeIssue[] {
       push(where, 'Pick an answer field.');
     } else if (tpl.grading.mode !== 'self' && !ANSWERABLE.has(answer.kind)) {
       push(where, `"${answer.name}" is a ${answer.kind} field — it can't be typed as an answer. Use reveal (self-graded) instead.`);
+    } else if (
+      answer.kind === 'clozeSentences' &&
+      tpl.grading.mode !== 'sentenceCloze' &&
+      tpl.grading.mode !== 'self'
+    ) {
+      // sentence objects are not typeable text — the card would accept nothing
+      push(where, `"${answer.name}" holds cloze sentences — grade it with sentence cloze, or answer a text field.`);
     }
 
     if (tpl.promptFieldIds.length === 0) push(where, 'Pick at least one prompt field.');
@@ -81,6 +88,9 @@ export function validateItemType(type: ItemType): TypeIssue[] {
     }
     for (const id of tpl.hintFieldIds) {
       if (!byId.has(id)) push(where, 'A hint field no longer exists — reselect it.');
+      else if (id === tpl.answerFieldId) {
+        push(where, `"${byId.get(id)!.name}" is both hint and answer — the hint would give the answer away.`);
+      }
     }
 
     if (tpl.grading.mode === 'sentenceCloze') {

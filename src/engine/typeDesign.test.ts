@@ -223,3 +223,33 @@ describe('image sizing', () => {
     expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MB');
   });
 });
+
+describe('validateItemType — answer leaks and cloze grading', () => {
+  it('rejects a hint field that is also the answer field', () => {
+    const t = type({ templates: [tpl({ id: 'tpl1', hintFieldIds: ['f2'] })] });
+    expect(messages(t).join()).toMatch(/both hint and answer/);
+    // a hint on a prompt field is fine
+    expect(validateItemType(type({ templates: [tpl({ id: 'tpl1', hintFieldIds: ['f1'] })] }))).toEqual([]);
+  });
+
+  it('a cloze-sentences answer field must be graded as sentence cloze', () => {
+    const fields = [field('f1', 'Word'), field('f2', 'Examples', 'clozeSentences')];
+    // typed and choice grading would compare against sentence objects — unanswerable
+    expect(messages(type({ fields })).join()).toMatch(/grade it with sentence cloze/);
+    expect(
+      messages(
+        type({ fields, templates: [tpl({ id: 'tpl1', grading: { mode: 'choice', choices: 4 } })] }),
+      ).join(),
+    ).toMatch(/sentence cloze/);
+    const ok = type({
+      fields,
+      templates: [
+        tpl({
+          id: 'tpl1',
+          grading: { mode: 'sentenceCloze', sentencesFieldId: 'f2', rotation: 'random' },
+        }),
+      ],
+    });
+    expect(validateItemType(ok)).toEqual([]);
+  });
+});
