@@ -1,6 +1,7 @@
 import Dexie from 'dexie';
 import { db } from '../db';
 import { newId } from '@/engine/ids';
+import { collectMediaIds, deleteOrphanMedia } from '@/services/media';
 import type { Course, SrsLadder } from '@/engine/types';
 
 export interface CreateCourseInput {
@@ -49,8 +50,19 @@ export async function updateCourse(course: Course, now: number): Promise<void> {
   await db.courses.put({ ...course, updatedAt: now });
 }
 
-/** Delete a course and everything it owns, including its seed-install marker. */
+/**
+ * Delete a course and everything it owns, including its seed-install marker
+ * and the images/audio only its items pointed at.
+ */
 export async function deleteCourse(courseId: string): Promise<void> {
+  // media is referenced only through field values — collect it before the rows go
+  const types = await db.itemTypes.where('courseId').equals(courseId).toArray();
+  const typeById = new Map(types.map((t) => [t.id, t]));
+  const mediaIds = (await db.items.where('courseId').equals(courseId).toArray()).flatMap((item) => {
+    const type = typeById.get(item.typeId);
+    return type ? collectMediaIds(item, type) : [];
+  });
+
   await db.transaction(
     'rw',
     [
@@ -88,6 +100,8 @@ export async function deleteCourse(courseId: string): Promise<void> {
       await db.courses.delete(courseId);
     },
   );
+  // after the commit, so an asset another course somehow shares is kept
+  await deleteOrphanMedia(mediaIds);
 }
 
 export async function getCourseLadder(course: Course): Promise<SrsLadder | undefined> {

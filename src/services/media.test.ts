@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db, ensurePresets } from '@/db/db';
-import { createCourse } from '@/db/repo/courses';
+import { createCourse, deleteCourse } from '@/db/repo/courses';
 import { createItem, deleteItem, saveItemEdit } from '@/db/repo/items';
 import { createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
 import { exportAll } from '@/db/export';
@@ -81,6 +81,15 @@ describe('media references', () => {
     const { item } = await seedPictureItem('m1');
     await deleteItem(item.id, NOW);
     expect(await db.media.get('m1')).toBeUndefined();
+  });
+
+  it('deleting a course frees the images its items held, and nothing else', async () => {
+    const { course } = await seedPictureItem('m1');
+    await db.media.add(asset('unrelated'));
+    await deleteCourse(course.id);
+    expect(await db.media.get('m1')).toBeUndefined();
+    expect(await db.media.get('unrelated')).toBeTruthy();
+    expect(await db.items.count()).toBe(0);
   });
 
   it('replacing an image in the editor frees the old one', async () => {
