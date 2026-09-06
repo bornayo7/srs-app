@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { db } from '@/db/db';
 import type { Item, ItemType } from '@/engine/types';
@@ -49,9 +49,12 @@ export default function LessonPage() {
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [batchError, setBatchError] = useState('');
+  // a load still in flight when the course changes must not show the old course's batch
+  const loadGeneration = useRef(0);
 
   const loadBatch = useCallback(async () => {
     if (!courseId) return;
+    const generation = ++loadGeneration.current;
     const batch = await nextLessonBatch(courseId, now());
     const types = new Map<string, ItemType>();
     for (const it of batch) {
@@ -60,6 +63,7 @@ export default function LessonPage() {
         if (t) types.set(t.id, t);
       }
     }
+    if (generation !== loadGeneration.current) return;
     // drop items whose type no longer resolves — rendering them would crash
     const teachable = batch.filter((it) => types.has(it.typeId));
     if (teachable.length === 0) {

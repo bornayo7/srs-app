@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import Dexie from 'dexie';
 import { db } from '@/db/db';
@@ -68,13 +68,18 @@ export default function CramPage() {
   const [total, setTotal] = useState(0);
   const [missCount, setMissCount] = useState(0);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  // a build still in flight when the course or scope changes must not show the old pool
+  const loadGeneration = useRef(0);
 
   const start = useCallback(async () => {
     if (!courseId) return;
+    const generation = ++loadGeneration.current;
+    const stale = () => generation !== loadGeneration.current;
     setPhase('loading');
     setFeedback(null);
     setMissCount(0);
     const pool = await buildPool(courseId, scope);
+    if (stale()) return;
     if (pool.length === 0) {
       setPhase('empty');
       return;
@@ -101,6 +106,7 @@ export default function CramPage() {
         entries.push(await withChoices(withClozePick({ card, item, itemType, template }, s), s, cache));
       }
     }
+    if (stale()) return;
     const shuffled = seededShuffle(entries, mulberry32(seed));
     setQueue(shuffled);
     setTotal(shuffled.length);

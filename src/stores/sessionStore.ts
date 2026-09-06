@@ -112,6 +112,14 @@ interface SessionState {
 
 const rng = mulberry32(Date.now() & 0x7fffffff);
 
+/**
+ * Bumped by every start() and reset(). A load that is still awaiting the
+ * database when a newer start/reset happens must drop its result. Otherwise
+ * navigating from one course's reviews straight to another's could end with
+ * the first course's cards on screen under the second course's URL.
+ */
+let loadGeneration = 0;
+
 export const useSession = create<SessionState>((set, get) => ({
   phase: 'idle',
   courseId: null,
@@ -126,8 +134,11 @@ export const useSession = create<SessionState>((set, get) => ({
   busy: false,
 
   async start(courseId) {
+    const generation = ++loadGeneration;
+    const stale = () => generation !== loadGeneration;
     set({ phase: 'loading', courseId });
     const cards = await dueCards(courseId, now());
+    if (stale()) return;
     if (cards.length === 0) {
       set({ phase: 'empty', queue: [], totalCards: 0, completed: [] });
       return;
@@ -142,6 +153,7 @@ export const useSession = create<SessionState>((set, get) => ({
         .filter((t): t is ItemType => !!t)
         .map((t) => [t.id, t]),
     );
+    if (stale()) return;
 
     const sessionSeed = now() & 0x7fffffff;
     const cache = newChoiceCache();
@@ -160,6 +172,8 @@ export const useSession = create<SessionState>((set, get) => ({
         );
       }
     }
+
+    if (stale()) return;
 
     const sortable = entries.map((e) => ({
       ...e,
@@ -341,6 +355,7 @@ export const useSession = create<SessionState>((set, get) => ({
   },
 
   reset() {
+    loadGeneration++; // an in-flight start() must not resurrect the session
     set({
       phase: 'idle',
       courseId: null,
