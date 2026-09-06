@@ -79,6 +79,9 @@ export function TypedInput({
             setText(kana && atEnd ? toKana(raw, { IMEMode: true }) : raw);
           }}
           onKeyDown={(e) => {
+            // A native IME (kana/kanji, pinyin, …) uses Enter to commit its
+            // composition — that Enter must never submit the half-typed answer.
+            if (e.nativeEvent.isComposing) return;
             // Explicit Enter handling — implicit form submission is unreliable
             // (no submit button, synthetic events, some mobile keyboards).
             // e.repeat ignored: a held Enter must not submit-and-continue.
