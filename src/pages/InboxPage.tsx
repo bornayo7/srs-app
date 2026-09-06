@@ -4,7 +4,9 @@ import { db } from '@/db/db';
 import { createItem } from '@/db/repo/items';
 import type { Capture, FieldValue, ItemType } from '@/engine/types';
 import { parseClozeLines } from '@/engine/grading/cloze';
+import { isMediaKind } from '@/engine/typeDesign';
 import { Badge, Button, Panel, TextInput } from '@/components/ui';
+import { splitList } from '@/components/editor/ListInput';
 import {
   archivePacket,
   checkPermission,
@@ -35,6 +37,10 @@ function ConvertCaptureRow({ capture }: { capture: Capture }) {
     [courseId],
   );
   const ty: ItemType | undefined = types?.find((t) => t.id === typeId) ?? types?.[0];
+  // a jotted note is text — media fields can't be filled here and start empty,
+  // exactly as the add-item form allows; the note itself lands in the first text field
+  const textFields = ty?.fields.filter((f) => !isMediaKind(f.kind)) ?? [];
+  const prefill = (fieldId: string) => (fieldId === textFields[0]?.id ? capture.text : '');
 
   return (
     <li className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
@@ -88,14 +94,15 @@ function ConvertCaptureRow({ capture }: { capture: Capture }) {
             </select>
           )}
           <div className="grid gap-2 sm:grid-cols-2">
-            {ty.fields.map((f, i) => (
+            {textFields.map((f) => (
               <label key={f.id} className="block">
                 <span className="mb-0.5 block text-xs text-slate-400">
                   {f.name}
                   {f.kind === 'clozeSentences' && ' (⟦blank⟧ per line)'}
+                  {f.kind === 'list' && ' (comma-separated)'}
                 </span>
                 <TextInput
-                  value={values[f.id] ?? (i === 0 ? capture.text : '')}
+                  value={values[f.id] ?? prefill(f.id)}
                   onChange={(e) => setValues({ ...values, [f.id]: e.target.value })}
                 />
               </label>
@@ -108,8 +115,12 @@ function ConvertCaptureRow({ capture }: { capture: Capture }) {
               onClick={async () => {
                 setError('');
                 const fieldValues: Record<string, FieldValue> = {};
-                for (const [i, f] of ty.fields.entries()) {
-                  const raw = (values[f.id] ?? (i === 0 ? capture.text : '')).trim();
+                for (const f of ty.fields) {
+                  if (isMediaKind(f.kind)) {
+                    fieldValues[f.id] = ''; // attach a picture or clip later, in the editor
+                    continue;
+                  }
+                  const raw = (values[f.id] ?? prefill(f.id)).trim();
                   if (!raw) {
                     setError(`Fill in "${f.name}".`);
                     return;
@@ -121,6 +132,8 @@ function ConvertCaptureRow({ capture }: { capture: Capture }) {
                       return;
                     }
                     fieldValues[f.id] = sentences;
+                  } else if (f.kind === 'list') {
+                    fieldValues[f.id] = splitList(raw); // an array, as the editor stores it
                   } else {
                     fieldValues[f.id] = raw;
                   }
