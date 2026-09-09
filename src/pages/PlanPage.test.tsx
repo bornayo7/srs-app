@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db, ensurePresets } from '@/db/db';
 import { createCourseWithType } from '@/services/contentCommands';
 import { addProposals } from '@/db/repo/proposals';
+import { acceptProposals } from '@/services/proposals';
 import type { Course, CoursePlan, ItemType } from '@/engine/types';
 import PlanPage from './PlanPage';
 
@@ -105,3 +106,54 @@ it('does not persist a release date until the explicit save action', async () =>
     expect((await db.plans.get(stored.id))?.units[0].releaseAt).toBe(Date.UTC(2099, 1, 28)),
   );
 });
+
+it.each(['Accept', 'Accept all valid'])(
+  '%s rechecks a stale prerequisite hint and accepts the now-valid child without editing it',
+  async (action) => {
+    const rows = await addProposals(
+      course.id,
+      null,
+      'manual',
+      [
+        {
+          level: 1,
+          item: {
+            key: 'foundation',
+            type: type.name,
+            fields: { Front: 'Foundation', Back: 'Parent answer' },
+          },
+          error: null,
+          duplicateOf: null,
+        },
+        {
+          level: 1,
+          item: {
+            key: 'advanced',
+            type: type.name,
+            fields: { Front: 'Advanced', Back: 'Child answer' },
+            prereqs: ['foundation'],
+          },
+          error: null,
+          duplicateOf: null,
+        },
+      ],
+      1000,
+    );
+    await acceptProposals([rows[1].id], 1001);
+    expect((await db.proposals.get(rows[1].id))?.error).toContain("hasn't been accepted yet");
+    await acceptProposals([rows[0].id], 1002);
+    renderPlan();
+    const button = await screen.findByRole('button', { name: action });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(async () =>
+      expect((await db.proposals.get(rows[1].id))?.status).toBe('accepted'),
+    );
+    const parent = await db.proposals.get(rows[0].id);
+    const child = await db.proposals.get(rows[1].id);
+    expect((await db.items.get(child!.acceptedItemId!))?.prereqIds).toEqual([
+      parent!.acceptedItemId,
+    ]);
+    expect(await db.items.count()).toBe(2);
+  },
+);

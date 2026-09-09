@@ -1,5 +1,7 @@
 # Prior audit inventory and corrections for the overhaul plan
 
+Implementation status: the original inventory below is preserved for traceability. [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md) now reconciles every label to the implemented outcome and evidence; [IMPLEMENTATION_PROGRESS.md](IMPLEMENTATION_PROGRESS.md) records completed checks and remaining platform qualifications.
+
 Source: the project memory note “SRS App Audit Fix Plan 2026-09-07”, read in full (414 lines / 90,357 bytes) on September 8, 2026. New verification evidence and corrections are in [CODEBASE_REVIEW.md](CODEBASE_REVIEW.md); execution phases are in [OVERHAUL_PLAN.md](OVERHAUL_PLAN.md). This file is an inventory of **historical findings**, not a claim that all 65 were newly re-executed today. It should be used for traceability rather than counted as 65 new findings.
 
 The note has chronological contradictions; its final addendum explicitly supersedes earlier claims. In particular, **SRS-11's blocked-UI mechanism is refuted**: Edit → Save or Reject → Restore clears the stale message without discarding the prerequisite. Residual issue is low-impact hint staleness, not an inaccessible or corrupt proposal. **Card revisions must use a dedicated monotonic `rev`; the old `updatedAt`/`expectedUpdatedAt` plan is superseded.** Keep timestamps for chronology/display. The node tests in the old note used fake IndexedDB/mock providers; previous claims do not establish native multi-tab, IME, browser permissions, real AI or production-host behavior.

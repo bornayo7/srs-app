@@ -1,6 +1,6 @@
 # Proposed SRS overhaul plan
 
-Status: proposed implementation sequence. This document records a review-backed plan, not an accepted architecture decision or a claim that the overhaul is implemented.
+Status: historical plan from the September 8 review, subsequently authorized and implemented on `codex/srs-overhaul`. The proposal text below is preserved as the planning record. Read [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md) for actual outcomes and adjustments, [IMPLEMENTATION_PROGRESS.md](IMPLEMENTATION_PROGRESS.md) for acceptance evidence and remaining platform qualifications, and [the accepted ADR](decisions/0001-overhaul-contracts.md) for decisions made during implementation.
 
 ## Objective and evidence
 

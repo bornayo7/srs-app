@@ -60,10 +60,7 @@ export function ProposalQueue({
         ))}
         {tab === 'pending' && pending.length > 0 && (
           <div className="flex flex-wrap gap-2 sm:ml-auto">
-            <Button
-              disabled={operation.busy || pending.every((p) => !!p.error)}
-              onClick={() => accept(pending.filter((p) => !p.error).map((p) => p.id))}
-            >
+            <Button disabled={operation.busy} onClick={() => accept(pending.map((p) => p.id))}>
               Accept all valid
             </Button>
             <Button
@@ -130,7 +127,7 @@ export function ProposalQueue({
                     <>
                       <Button
                         variant="primary"
-                        disabled={operation.busy || !!proposal.error}
+                        disabled={operation.busy}
                         onClick={() => accept([proposal.id])}
                       >
                         Accept
