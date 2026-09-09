@@ -13,7 +13,7 @@ the browser database directly:
 
 ## Setup
 
-1. `npm install` in this folder (once).
+1. Run `npm ci` from the repository root. The root npm workspace installs both the app and MCP server, including their shared packet schemas.
 2. In the SRS app: **Inbox → Connect exchange folder** → pick (or create) `~/srs-exchange`
    (Chrome/Edge only — the File System Access API).
 3. Register the server in your MCP client.

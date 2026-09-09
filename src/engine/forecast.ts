@@ -1,4 +1,4 @@
-import { DAY, startOfLocalDay } from './time';
+import { DAY, localDayAfter, startOfLocalDay } from './time';
 
 export interface ForecastInput {
   state: string;
@@ -21,7 +21,7 @@ export interface Forecast {
 export function buildForecast(cards: readonly ForecastInput[], now: number, numDays = 7): Forecast {
   const todayStart = startOfLocalDay(now);
   const days: ForecastDay[] = Array.from({ length: numDays }, (_, i) => ({
-    dayStart: todayStart + i * DAY,
+    dayStart: localDayAfter(todayStart, i),
     count: 0,
     cumulative: 0,
   }));

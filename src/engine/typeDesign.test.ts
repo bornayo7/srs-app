@@ -27,6 +27,8 @@ const tpl = (over: Partial<CardTemplate> & { id: string }): CardTemplate => ({
 });
 
 const type = (over: Partial<ItemType> = {}): ItemType => ({
+  rev: 0,
+  generation: 'legacy',
   id: 't1',
   courseId: 'c1',
   name: 'Basic',
@@ -61,19 +63,23 @@ describe('validateItemType', () => {
     expect(
       messages(type({ templates: [tpl({ id: 'x', promptFieldIds: ['gone'] })] })).join(),
     ).toMatch(/prompt field no longer exists/);
-    expect(messages(type({ templates: [tpl({ id: 'x', hintFieldIds: ['gone'] })] })).join()).toMatch(
-      /hint field no longer exists/,
-    );
+    expect(
+      messages(type({ templates: [tpl({ id: 'x', hintFieldIds: ['gone'] })] })).join(),
+    ).toMatch(/hint field no longer exists/);
   });
 
-  it('an image field cannot be a typed answer, but reveal mode accepts it', () => {
+  it('rejects media as typed answers and the unavailable self-grading mode', () => {
     const fields = [field('f1', 'Front'), field('f2', 'Picture', 'image')];
     expect(messages(type({ fields })).join()).toMatch(/can't be typed as an answer/);
     expect(
       validateItemType(
         type({ fields, templates: [tpl({ id: 'tpl1', grading: { mode: 'self' } })] }),
       ),
-    ).toEqual([]);
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringMatching(/not supported/) }),
+      ]),
+    );
   });
 
   it('sentence-cloze must point at a clozeSentences field', () => {
@@ -82,7 +88,9 @@ describe('validateItemType', () => {
       id: 'tpl1',
       grading: { mode: 'sentenceCloze', sentencesFieldId: 'f2', rotation: 'random' },
     });
-    expect(messages(type({ fields, templates: [cloze] })).join()).toMatch(/must be a clozeSentences/);
+    expect(messages(type({ fields, templates: [cloze] })).join()).toMatch(
+      /must be a clozeSentences/,
+    );
     const ok = type({
       fields: [field('f1', 'Word'), field('f2', 'Examples', 'clozeSentences')],
       templates: [cloze],
@@ -91,14 +99,16 @@ describe('validateItemType', () => {
   });
 
   it('catches duplicate names and out-of-range choice counts', () => {
+    expect(messages(type({ fields: [field('f1', 'Front'), field('f2', 'front')] })).join()).toMatch(
+      /Duplicate field name/,
+    );
+    expect(messages(type({ templates: [tpl({ id: 'a' }), tpl({ id: 'b' })] })).join()).toMatch(
+      /Duplicate template name/,
+    );
     expect(
-      messages(type({ fields: [field('f1', 'Front'), field('f2', 'front')] })).join(),
-    ).toMatch(/Duplicate field name/);
-    expect(
-      messages(type({ templates: [tpl({ id: 'a' }), tpl({ id: 'b' })] })).join(),
-    ).toMatch(/Duplicate template name/);
-    expect(
-      messages(type({ templates: [tpl({ id: 'a', grading: { mode: 'choice', choices: 1 } })] })).join(),
+      messages(
+        type({ templates: [tpl({ id: 'a', grading: { mode: 'choice', choices: 1 } })] }),
+      ).join(),
     ).toMatch(/between 2 and 6/);
   });
 });
@@ -116,7 +126,10 @@ describe('diffItemType', () => {
     expect(d.removedFieldIds).toEqual(['f2']);
     expect(d.kindChanges).toEqual([]);
 
-    const kindOnly = diffItemType(prev, type({ fields: [field('f1', 'Front'), field('f2', 'Back', 'list')] }));
+    const kindOnly = diffItemType(
+      prev,
+      type({ fields: [field('f1', 'Front'), field('f2', 'Back', 'list')] }),
+    );
     expect(kindOnly.kindChanges).toEqual([{ id: 'f2', from: 'text', to: 'list' }]);
     expect(kindOnly.removedFieldIds).toEqual([]);
   });
@@ -134,21 +147,30 @@ describe('field value conversion', () => {
   });
 
   it('cloze sentences degrade to their revealed text', () => {
-    const sentences = [{ text: 'The cat sat ⟦on⟧ the mat', translation: 'x' }];
+    const sentences = [{ text: 'The cat sat ⟦on⟧ the mat' }];
     expect(convertFieldValue(sentences, 'clozeSentences', 'text')).toBe('The cat sat on the mat');
-    expect(convertFieldValue(sentences, 'clozeSentences', 'list')).toEqual(['The cat sat on the mat']);
+    expect(convertFieldValue(sentences, 'clozeSentences', 'list')).toEqual([
+      'The cat sat on the mat',
+    ]);
   });
 
-  it('unmarked text converted to cloze keeps only parsable sentences', () => {
-    expect(convertFieldValue('no blank here', 'text', 'clozeSentences')).toEqual([]);
+  it('unmarked text cannot be silently discarded by cloze conversion', () => {
+    expect(() => convertFieldValue('no blank here', 'text', 'clozeSentences')).toThrow(
+      /original content has been kept/,
+    );
     expect(convertFieldValue('Hang ⟦on⟧ a second', 'text', 'clozeSentences')).toEqual([
       { text: 'Hang ⟦on⟧ a second' },
     ]);
   });
 
-  it('media conversions always clear — an id is not text and text is not an id', () => {
-    expect(convertFieldValue('media-uuid', 'image', 'text')).toBe('');
-    expect(convertFieldValue('hello', 'text', 'image')).toBe('');
+  it('refuses to erase populated media fields or sentence annotations', () => {
+    expect(() => convertFieldValue('media-uuid', 'image', 'text')).toThrow(/original content/);
+    expect(() => convertFieldValue('hello', 'text', 'image')).toThrow(/original content/);
+    expect(() =>
+      convertFieldValue([{ text: 'Go ⟦there⟧.', hint: 'place' }], 'clozeSentences', 'text'),
+    ).toThrow(/translations or hints/);
+    expect(convertFieldValue('', 'text', 'image')).toBe('');
+    expect(convertFieldValue('', 'image', 'list')).toEqual([]);
   });
 
   it('migrateFieldValues drops removed fields and seeds new ones empty', () => {
@@ -229,7 +251,9 @@ describe('validateItemType — answer leaks and cloze grading', () => {
     const t = type({ templates: [tpl({ id: 'tpl1', hintFieldIds: ['f2'] })] });
     expect(messages(t).join()).toMatch(/both hint and answer/);
     // a hint on a prompt field is fine
-    expect(validateItemType(type({ templates: [tpl({ id: 'tpl1', hintFieldIds: ['f1'] })] }))).toEqual([]);
+    expect(
+      validateItemType(type({ templates: [tpl({ id: 'tpl1', hintFieldIds: ['f1'] })] })),
+    ).toEqual([]);
   });
 
   it('a cloze-sentences answer field must be graded as sentence cloze', () => {

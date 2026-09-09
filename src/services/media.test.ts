@@ -1,16 +1,25 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, ensurePresets } from '@/db/db';
 import { createCourse, deleteCourse } from '@/db/repo/courses';
 import { createItem, deleteItem, saveItemEdit } from '@/db/repo/items';
 import { createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
 import { exportAll } from '@/db/export';
 import { importAll } from '@/db/import';
-import { collectMediaIds, deleteOrphanMedia, mediaUsage, purgeOrphanMedia } from './media';
+import {
+  clearMediaUrlCache,
+  collectMediaIds,
+  deleteOrphanMedia,
+  mediaUrl,
+  mediaUsage,
+  purgeOrphanMedia,
+} from './media';
 import type { MediaAsset } from '@/engine/types';
 
 const NOW = Date.UTC(2026, 0, 15, 10, 23);
 
 async function wipe() {
+  clearMediaUrlCache();
+  vi.restoreAllMocks();
   await Promise.all(db.tables.map((t) => t.clear()));
   await ensurePresets();
 }
@@ -83,6 +92,35 @@ describe('media references', () => {
     expect(await db.media.get('m1')).toBeUndefined();
   });
 
+  it('keeps shared media until the last referencing item is removed', async () => {
+    const { course, type, item } = await seedPictureItem('shared');
+    const other = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: item.fieldValues },
+      NOW,
+    );
+    await deleteItem(item.id, NOW);
+    expect(await db.media.get('shared')).toBeDefined();
+    await deleteItem(other.id, NOW);
+    expect(await db.media.get('shared')).toBeUndefined();
+  });
+
+  it('rolls back media deletion without revoking a displayed URL', async () => {
+    const { item } = await seedPictureItem('displayed');
+    const url = await mediaUrl('displayed');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    await expect(
+      db.transaction('rw', db.tables, async () => {
+        await deleteItem(item.id, NOW);
+        throw new Error('later command failed');
+      }),
+    ).rejects.toThrow(/later command/);
+    expect(await db.media.get('displayed')).toBeDefined();
+    expect(await mediaUrl('displayed')).toBe(url);
+    expect(revoke).not.toHaveBeenCalled();
+    await deleteItem(item.id, NOW);
+    expect(revoke).toHaveBeenCalledWith(url);
+  });
+
   it('deleting a course frees the images its items held, and nothing else', async () => {
     const { course } = await seedPictureItem('m1');
     await db.media.add(asset('unrelated'));
@@ -128,7 +166,20 @@ describe('backups carry media', () => {
 
   it('a backup written before media existed still imports', async () => {
     const backup = await exportAll(NOW);
+    backup.formatVersion = 1;
     delete (backup.data as { media?: unknown[] }).media;
     await expect(importAll(JSON.parse(JSON.stringify(backup)))).resolves.toBeTruthy();
+  });
+
+  it('replaces cached bytes when a backup reuses a media id', async () => {
+    await seedPictureItem('same-id');
+    const before = await mediaUrl('same-id');
+    const backup = await exportAll(NOW);
+    (backup.data.media![0] as { data: string }).data = btoa('replacement bytes');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    await importAll(backup);
+    expect(revoke).toHaveBeenCalledWith(before);
+    expect(await mediaUrl('same-id')).not.toBe(before);
+    expect(await (await db.media.get('same-id'))!.blob.text()).toBe('replacement bytes');
   });
 });

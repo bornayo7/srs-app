@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { db, ensurePresets } from '@/db/db';
-import { createCourse, updateCourse } from '@/db/repo/courses';
+import { createCourse } from '@/db/repo/courses';
+import { saveCourseSettings } from './contentCommands';
 import { createItem } from '@/db/repo/items';
 import { createItemType, basicTypeSpec } from '@/db/repo/itemTypes';
-import { commitReview } from './commitReview';
-import { completeLessonBatch } from './lessons';
+import { reviewCard as commitReview } from '@/test/study';
+import { teachItems as completeLessonBatch } from '@/test/study';
 import { undoReview } from './undo';
 import { HOUR } from '@/engine/time';
 import type { Card, Course } from '@/engine/types';
@@ -15,7 +16,7 @@ async function setup(ghosts: Course['ghosts']): Promise<{ course: Course; card: 
   await Promise.all(db.tables.map((t) => t.clear()));
   await ensurePresets();
   const course = await createCourse({ name: 'G', ladderPresetId: 'preset-classic' }, NOW);
-  await updateCourse({ ...course, ghosts }, NOW);
+  await saveCourseSettings(course.id, { ghosts }, NOW);
   const type = await createItemType(course.id, basicTypeSpec(), NOW);
   const item = await createItem(
     {

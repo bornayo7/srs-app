@@ -17,10 +17,11 @@ export function clockOffset(): number {
 export async function initClock(): Promise<void> {
   if (!import.meta.env.DEV) return;
   const row = await db.meta.get('devClockOffsetMs');
-  offsetMs = typeof row?.value === 'number' ? row.value : 0;
+  offsetMs = typeof row?.value === 'number' && Number.isFinite(row.value) ? row.value : 0;
 }
 
 export async function setClockOffset(ms: number): Promise<void> {
-  offsetMs = ms;
+  if (!Number.isFinite(ms)) throw new Error('The clock offset must be a finite duration.');
   await db.meta.put({ key: 'devClockOffsetMs', value: ms });
+  offsetMs = ms;
 }

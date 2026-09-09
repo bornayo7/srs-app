@@ -3,23 +3,9 @@ import { db, ensurePresets } from '@/db/db';
 import { applyPacket } from '@/packages/importPacket';
 import { parsePacket, PACKET_FORMAT, PACKET_VERSION } from '@/packages/schema';
 import { buildSnapshot } from './snapshot';
+import { snapshotSchema } from './snapshotSchema';
 
 const NOW = Date.UTC(2026, 8, 1, 9, 0);
-
-interface SnapUnit {
-  level: number;
-  title: string;
-  released: boolean;
-  releaseAt: string | null;
-  pendingProposals: number;
-}
-interface SnapCourse {
-  id: string;
-  currentLevel: number;
-  plan: { releaseMode: string; hasMaterial: boolean; units: SnapUnit[] } | null;
-  counts: { pendingProposals: number; items: number };
-  items: { level: number; preview: string }[];
-}
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((t) => t.clear()));
@@ -67,14 +53,33 @@ describe('snapshot', () => {
       NOW + 1,
     );
 
-    const snap = (await buildSnapshot(NOW + 2)) as { courses: SnapCourse[] };
+    const snap = await buildSnapshot(NOW + 2);
+    expect(snapshotSchema.parse(snap)).toEqual(snap);
     const bio = snap.courses.find((c) => c.id === planned.courseId)!;
     expect(bio.currentLevel).toBe(1);
     expect(bio.plan?.releaseMode).toBe('schedule');
     expect(bio.plan?.hasMaterial).toBe(true);
     expect(bio.plan?.units).toEqual([
-      { level: 1, title: 'Cells', summary: '', topics: [], targetCount: 1, released: true, releaseAt: null, pendingProposals: 1 },
-      { level: 2, title: 'Genetics', summary: '', topics: [], targetCount: 0, released: false, releaseAt: '2026-09-15', pendingProposals: 0 },
+      {
+        level: 1,
+        title: 'Cells',
+        summary: '',
+        topics: [],
+        targetCount: 1,
+        released: true,
+        releaseAt: null,
+        pendingProposals: 1,
+      },
+      {
+        level: 2,
+        title: 'Genetics',
+        summary: '',
+        topics: [],
+        targetCount: 0,
+        released: false,
+        releaseAt: '2026-09-15',
+        pendingProposals: 0,
+      },
     ]);
     expect(bio.counts.pendingProposals).toBe(1);
     expect(bio.counts.items).toBe(0);
@@ -83,5 +88,108 @@ describe('snapshot', () => {
     expect(other.plan).toBeNull();
     expect(other.counts.pendingProposals).toBe(0);
     expect(other.items[0].level).toBe(1);
+  });
+
+  it('publishes typed, choice, cloze, and hint metadata without losing it at the read boundary', async () => {
+    await applyPacket(
+      parsePacket({
+        format: PACKET_FORMAT,
+        version: PACKET_VERSION,
+        kind: 'create-course',
+        course: { name: 'Japanese' },
+        itemTypes: [
+          {
+            name: 'Word',
+            fields: [{ name: 'Word' }, { name: 'Reading' }, { name: 'Hint' }],
+            templates: [
+              {
+                name: 'Read',
+                promptFields: ['Word'],
+                answerField: 'Reading',
+                mode: 'typed',
+                answerLang: 'kana',
+                typoTolerance: false,
+                hintFields: ['Hint'],
+              },
+              {
+                name: 'Choose',
+                promptFields: ['Word'],
+                answerField: 'Reading',
+                mode: 'choice',
+                choices: 6,
+              },
+            ],
+          },
+          {
+            name: 'Sentence',
+            fields: [
+              { name: 'Topic' },
+              { name: 'Sentences', kind: 'clozeSentences' },
+              { name: 'Hint' },
+            ],
+            templates: [
+              {
+                name: 'Complete',
+                promptFields: ['Topic'],
+                answerField: 'Sentences',
+                mode: 'sentenceCloze',
+                rotation: 'sequential',
+                hintFields: ['Hint'],
+              },
+            ],
+          },
+        ],
+        items: [],
+      }),
+      NOW,
+    );
+    const snapshot = await buildSnapshot(NOW + 1);
+    const parsed = snapshotSchema.parse(snapshot);
+    expect(parsed).toEqual(snapshot);
+    expect(parsed.courses[0].itemTypes.flatMap((type) => type.templates)).toEqual(
+      expect.arrayContaining([
+        {
+          name: 'Read',
+          promptFields: ['Word'],
+          answerField: 'Reading',
+          mode: 'typed',
+          answerLang: 'kana',
+          typoTolerance: false,
+          hintFields: ['Hint'],
+        },
+        {
+          name: 'Choose',
+          promptFields: ['Word'],
+          answerField: 'Reading',
+          mode: 'choice',
+          choices: 6,
+          hintFields: [],
+        },
+        {
+          name: 'Complete',
+          promptFields: ['Topic'],
+          answerField: 'Sentences',
+          mode: 'sentenceCloze',
+          rotation: 'sequential',
+          hintFields: ['Hint'],
+        },
+      ]),
+    );
+
+    const legacy = {
+      ...snapshot,
+      courses: snapshot.courses.map((course) => ({
+        ...course,
+        itemTypes: course.itemTypes.map((type) => ({
+          ...type,
+          templates: type.templates.map(({ name, promptFields, answerField }) => ({
+            name,
+            promptFields,
+            answerField,
+          })),
+        })),
+      })),
+    };
+    expect(snapshotSchema.parse(legacy)).toEqual(legacy);
   });
 });

@@ -1,5 +1,5 @@
 import { db } from '@/db/db';
-import { planForCourse, updatePlan } from '@/db/repo/plans';
+import { planForCourse, mutatePlan, validateUnit } from '@/db/repo/plans';
 import { DEFAULT_PASS_PERCENT } from '@/engine/levels';
 import type { Course, CoursePlan, PlanReleaseMode, PlanUnit } from '@/engine/types';
 import { applyPacket } from '@/packages/importPacket';
@@ -55,11 +55,11 @@ export async function createPlannedCourse(
     itemTypes: input.itemTypes,
     units: input.units,
     material: input.material,
+    materialTruncated: input.materialTruncated,
   });
   const res = await applyPacket(packet, now, { source: 'ai' });
   const plan = await planForCourse(res.courseId);
   if (!plan) throw new Error('plan was not created');
-  if (input.materialTruncated) await updatePlan({ ...plan, materialTruncated: true }, now);
   return {
     courseId: res.courseId,
     planId: plan.id,
@@ -76,6 +76,9 @@ async function requirePlan(courseId: string): Promise<{ course: Course; plan: Co
   return { course, plan };
 }
 
+// Releasing a unit and its eligible lessons is one indivisible state change.
+const releaseTables = () => [db.courses, db.plans, db.items, db.cards, db.itemTypes, db.ladders];
+
 /**
  * Raise the course to `level` (never lowers, never past the last unit) and
  * open whatever that unlocks. Returns the new level, or null if nothing moved.
@@ -85,18 +88,24 @@ export async function releaseUnit(
   level: number,
   now: number,
 ): Promise<number | null> {
-  const { course, plan } = await requirePlan(courseId);
-  const target = Math.min(Math.max(1, Math.floor(level)), plan.units.length);
-  if (target <= course.currentLevel) return null;
-  await db.courses.put({ ...course, currentLevel: target, updatedAt: now });
-  await recomputeUnlocks(courseId, now);
-  return target;
+  if (!Number.isInteger(level) || level < 1)
+    throw new Error('Level must be a positive whole number.');
+  return db.transaction('rw', releaseTables(), async () => {
+    const { course, plan } = await requirePlan(courseId);
+    const target = Math.min(Math.max(1, Math.floor(level)), plan.units.length);
+    if (target <= course.currentLevel) return null;
+    await db.courses.put({ ...course, currentLevel: target, updatedAt: now });
+    await recomputeUnlocks(courseId, now);
+    return target;
+  });
 }
 
 /** The manual-mode button. */
 export async function releaseNextUnit(courseId: string, now: number): Promise<number | null> {
-  const { course } = await requirePlan(courseId);
-  return releaseUnit(courseId, course.currentLevel + 1, now);
+  return db.transaction('rw', releaseTables(), async () => {
+    const { course } = await requirePlan(courseId);
+    return releaseUnit(courseId, course.currentLevel + 1, now);
+  });
 }
 
 /**
@@ -104,26 +113,30 @@ export async function releaseNextUnit(courseId: string, now: number): Promise<nu
  * every app load. Returns the new level, or null if nothing was due.
  */
 export async function syncScheduledRelease(courseId: string, now: number): Promise<number | null> {
-  const plan = await planForCourse(courseId);
-  if (!plan || plan.releaseMode !== 'schedule') return null;
-  const due = plan.units.filter((u) => u.releaseAt !== undefined && u.releaseAt <= now);
-  if (due.length === 0) return null;
-  return releaseUnit(courseId, Math.max(...due.map((u) => u.level)), now);
+  return db.transaction('rw', releaseTables(), async () => {
+    const plan = await planForCourse(courseId);
+    if (!plan || plan.releaseMode !== 'schedule') return null;
+    const due = plan.units.filter((u) => u.releaseAt !== undefined && u.releaseAt <= now);
+    if (due.length === 0) return null;
+    return releaseUnit(courseId, Math.max(...due.map((u) => u.level)), now);
+  });
 }
 
 export async function syncAllScheduledReleases(
   now: number,
 ): Promise<{ courseId: string; level: number }[]> {
   const out: { courseId: string; level: number }[] = [];
+  const errors: string[] = [];
   for (const plan of await db.plans.toArray()) {
     if (plan.releaseMode !== 'schedule') continue;
     try {
       const level = await syncScheduledRelease(plan.courseId, now);
       if (level !== null) out.push({ courseId: plan.courseId, level });
-    } catch {
-      // one broken plan must not block the others (or startup)
+    } catch (error) {
+      errors.push(`${plan.title}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  if (errors.length) throw new Error(`Some scheduled units could not open: ${errors.join('; ')}`);
   return out;
 }
 
@@ -137,20 +150,23 @@ export async function setReleaseMode(
   mode: PlanReleaseMode,
   now: number,
 ): Promise<void> {
-  const { course, plan } = await requirePlan(courseId);
-  await updatePlan({ ...plan, releaseMode: mode }, now);
-  await db.courses.put({
-    ...course,
-    levelMode: 'levels',
-    levelConfig: {
-      gateTypeIds: course.levelConfig?.gateTypeIds ?? [],
-      passPercent: course.levelConfig?.passPercent ?? DEFAULT_PASS_PERCENT,
-      autoAdvance: mode === 'progress',
-    },
-    updatedAt: now,
+  if (!['progress', 'schedule', 'manual'].includes(mode)) throw new Error('Unknown release mode.');
+  return db.transaction('rw', releaseTables(), async () => {
+    const { course, plan } = await requirePlan(courseId);
+    await mutatePlan(plan.id, (current) => ({ ...current, releaseMode: mode }), now);
+    await db.courses.put({
+      ...course,
+      levelMode: 'levels',
+      levelConfig: {
+        gateTypeIds: course.levelConfig?.gateTypeIds ?? [],
+        passPercent: course.levelConfig?.passPercent ?? DEFAULT_PASS_PERCENT,
+        autoAdvance: mode === 'progress',
+      },
+      updatedAt: now,
+    });
+    if (mode === 'progress') await recomputeUnlocks(courseId, now);
+    if (mode === 'schedule') await syncScheduledRelease(courseId, now);
   });
-  if (mode === 'progress') await recomputeUnlocks(courseId, now);
-  if (mode === 'schedule') await syncScheduledRelease(courseId, now);
 }
 
 export async function updateUnit(
@@ -159,16 +175,19 @@ export async function updateUnit(
   patch: Partial<Omit<PlanUnit, 'level'>>,
   now: number,
 ): Promise<PlanUnit> {
-  const { plan } = await requirePlan(courseId);
-  const idx = plan.units.findIndex((u) => u.level === level);
-  if (idx < 0) throw new Error(`no unit at level ${level}`);
-  const next: PlanUnit = { ...plan.units[idx], ...patch, level };
-  if (patch.releaseAt === undefined && 'releaseAt' in patch) delete next.releaseAt;
-  const units = plan.units.map((u, i) => (i === idx ? next : u));
-  await updatePlan({ ...plan, units }, now);
-  // a date edit may make a unit due right now
-  if (plan.releaseMode === 'schedule') await syncScheduledRelease(courseId, now);
-  return next;
+  return db.transaction('rw', releaseTables(), async () => {
+    const { plan } = await requirePlan(courseId);
+    const idx = plan.units.findIndex((u) => u.level === level);
+    if (idx < 0) throw new Error(`no unit at level ${level}`);
+    const next: PlanUnit = { ...plan.units[idx], ...patch, level };
+    if (patch.releaseAt === undefined && 'releaseAt' in patch) delete next.releaseAt;
+    validateUnit(next);
+    const units = plan.units.map((u, i) => (i === idx ? next : u));
+    await mutatePlan(plan.id, (current) => ({ ...current, units }), now);
+    // a date edit may make a unit due right now
+    if (plan.releaseMode === 'schedule') await syncScheduledRelease(courseId, now);
+    return next;
+  });
 }
 
 /** Add a unit at the end — it becomes the next level. Reordering is not supported. */
@@ -177,10 +196,12 @@ export async function appendUnit(
   unit: Omit<PlanUnit, 'level'>,
   now: number,
 ): Promise<PlanUnit> {
-  const { plan } = await requirePlan(courseId);
-  const next: PlanUnit = { ...unit, level: plan.units.length + 1 };
-  await updatePlan({ ...plan, units: [...plan.units, next] }, now);
-  return next;
+  return db.transaction('rw', [db.plans, db.courses], async () => {
+    const { plan } = await requirePlan(courseId);
+    const next: PlanUnit = { ...unit, level: plan.units.length + 1 };
+    await mutatePlan(plan.id, (current) => ({ ...current, units: [...current.units, next] }), now);
+    return next;
+  });
 }
 
 export interface UnitProgress {
@@ -210,30 +231,32 @@ export interface PlanProgress {
 
 /** Everything the plan page needs in one read. */
 export async function planProgress(courseId: string): Promise<PlanProgress | null> {
-  const course = await db.courses.get(courseId);
-  const plan = await planForCourse(courseId);
-  if (!course || !plan) return null;
-  const proposals = await db.proposals.where('courseId').equals(courseId).toArray();
-  const items = await db.items.where('courseId').equals(courseId).toArray();
+  return db.transaction('r', [db.courses, db.plans, db.proposals, db.items], async () => {
+    const course = await db.courses.get(courseId);
+    const plan = await planForCourse(courseId);
+    if (!course || !plan) return null;
+    const proposals = await db.proposals.where('courseId').equals(courseId).toArray();
+    const items = await db.items.where('courseId').equals(courseId).toArray();
 
-  const units = plan.units.map((u): UnitProgress => {
-    const mine = proposals.filter((p) => p.level === u.level);
-    const levelItems = items.filter((i) => i.level === u.level);
+    const units = plan.units.map((u): UnitProgress => {
+      const mine = proposals.filter((p) => p.level === u.level);
+      const levelItems = items.filter((i) => i.level === u.level);
+      return {
+        ...u,
+        released: u.level <= course.currentLevel,
+        current: u.level === course.currentLevel,
+        pending: mine.filter((p) => p.status === 'pending').length,
+        accepted: mine.filter((p) => p.status === 'accepted').length,
+        rejected: mine.filter((p) => p.status === 'rejected').length,
+        items: levelItems.length,
+        passed: levelItems.filter((i) => i.passedAt !== null).length,
+      };
+    });
     return {
-      ...u,
-      released: u.level <= course.currentLevel,
-      current: u.level === course.currentLevel,
-      pending: mine.filter((p) => p.status === 'pending').length,
-      accepted: mine.filter((p) => p.status === 'accepted').length,
-      rejected: mine.filter((p) => p.status === 'rejected').length,
-      items: levelItems.length,
-      passed: levelItems.filter((i) => i.passedAt !== null).length,
+      plan,
+      course,
+      units,
+      pendingTotal: proposals.filter((p) => p.status === 'pending').length,
     };
   });
-  return {
-    plan,
-    course,
-    units,
-    pendingTotal: proposals.filter((p) => p.status === 'pending').length,
-  };
 }

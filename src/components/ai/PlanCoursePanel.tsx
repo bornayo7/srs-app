@@ -11,6 +11,7 @@ import {
   type PlannedOutline,
 } from '@/ai/plan';
 import type { PlanReleaseMode } from '@/engine/types';
+import { assertLessonSettings } from '@/engine/lessonSettings';
 import { useAiReady } from '@/hooks/useAiReady';
 import { createPlannedCourse } from '@/services/plans';
 import { now } from '@/services/clock';
@@ -69,7 +70,10 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
 
   if (aiReady === false) {
     return (
-      <Panel title="📚 Plan a course from your material">
+      <Panel
+        title="Plan a course from your material"
+        actions={<Button onClick={onDone}>Close</Button>}
+      >
         <p className="text-sm text-slate-400">
           Add an API key in{' '}
           <Link to="/settings" className="text-violet-300 hover:underline">
@@ -86,7 +90,10 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
   const setOutline = (next: PlannedOutline) => planned && setPlanned({ ...planned, outline: next });
   const setUnit = (i: number, patch: Partial<PlannedOutline['units'][number]>) =>
     outline &&
-    setOutline({ ...outline, units: outline.units.map((u, j) => (j === i ? { ...u, ...patch } : u)) });
+    setOutline({
+      ...outline,
+      units: outline.units.map((u, j) => (j === i ? { ...u, ...patch } : u)),
+    });
 
   return (
     <Panel
@@ -100,6 +107,8 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
       {!planned && (
         <div className="space-y-3">
           <TextArea
+            aria-label="Course material"
+            disabled={busy}
             value={material}
             onChange={(e) => setMaterial(e.target.value)}
             rows={10}
@@ -116,6 +125,8 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
             </span>
           </div>
           <TextInput
+            aria-label="Guidance for the course plan"
+            disabled={busy}
             value={hint}
             onChange={(e) => setHint(e.target.value)}
             placeholder="Optional steer — “12-week class, exams in weeks 6 and 12”, “focus on definitions and formulas”"
@@ -143,17 +154,20 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
             <Field label="New lessons / day">
               <TextInput
                 type="number"
-                min={1}
-                value={newPerDay}
-                onChange={(e) => setNewPerDay(Math.max(1, +e.target.value || 1))}
+                min={0}
+                step={1}
+                disabled={busy}
+                value={Number.isNaN(newPerDay) ? '' : newPerDay}
+                onChange={(e) => setNewPerDay(e.target.valueAsNumber)}
                 className="max-w-24"
               />
             </Field>
             <Button
               variant="primary"
-              disabled={busy || !material.trim()}
+              disabled={busy || aiReady !== true || !material.trim()}
               onClick={() =>
                 void guarded(async () => {
+                  assertLessonSettings({ newPerDay, batchSize: 5 });
                   setPlanned(await planCourse(material, { hint }));
                 })
               }
@@ -162,10 +176,14 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
             </Button>
           </div>
           <p className="text-[11px] text-slate-500">
-            {RELEASE_MODES.find((m) => m.id === releaseMode)?.hint} Within a unit, the daily
-            lesson limit drips items in a few at a time.
+            {RELEASE_MODES.find((m) => m.id === releaseMode)?.hint} Within a unit, the daily lesson
+            limit drips items in a few at a time.
           </p>
-          {error && <p className="text-sm text-rose-300">{error}</p>}
+          {error && (
+            <p role="alert" className="text-sm text-rose-300">
+              {error}
+            </p>
+          )}
         </div>
       )}
 
@@ -174,8 +192,8 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
           {planned.materialTruncated && (
             <p className="text-xs text-amber-300">
               Your material was longer than the cap — this plan covers the first{' '}
-              {MATERIAL_CHAR_CAP.toLocaleString()} characters. Put the rest in a second course
-              if it matters.
+              {MATERIAL_CHAR_CAP.toLocaleString()} characters. Put the rest in a second course if it
+              matters.
             </p>
           )}
           <div className="grid gap-2 sm:grid-cols-2">
@@ -221,7 +239,9 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
                       type="number"
                       min={1}
                       value={u.targetCount}
-                      onChange={(e) => setUnit(i, { targetCount: Math.max(1, +e.target.value || 1) })}
+                      onChange={(e) =>
+                        setUnit(i, { targetCount: Math.max(1, +e.target.value || 1) })
+                      }
                       className="max-w-20"
                     />
                   </label>
@@ -255,6 +275,12 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
               </li>
             ))}
           </ol>
+          {releaseMode === 'schedule' && outline.units.some((unit) => !unit.date.trim()) && (
+            <p role="status" className="text-sm text-amber-300">
+              Units without an opening date stay closed until you add a date or release them
+              manually.
+            </p>
+          )}
           <Button
             onClick={() =>
               setOutline({
@@ -281,9 +307,15 @@ export function PlanCoursePanel({ onDone }: { onDone: () => void }) {
               ))}
             </ul>
           )}
-          {error && <p className="text-sm text-rose-300">{error}</p>}
+          {error && (
+            <p role="alert" className="text-sm text-rose-300">
+              {error}
+            </p>
+          )}
           <div className="flex gap-2">
-            <Button onClick={() => setPlanned(null)}>← Start over</Button>
+            <Button disabled={busy} onClick={() => setPlanned(null)}>
+              Start over
+            </Button>
             <Button
               variant="primary"
               disabled={busy || problems.length > 0 || !outline.courseName.trim()}

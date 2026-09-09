@@ -39,7 +39,7 @@ export async function isSeedInstalled(seed: SeedCourse): Promise<boolean> {
 export async function installSeed(seed: SeedCourse, now: number): Promise<string> {
   return db.transaction(
     'rw',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.meta],
+    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.meta, db.media],
     () => installSeedInner(seed, now),
   );
 }
@@ -94,7 +94,8 @@ async function installSeedInner(seed: SeedCourse, now: number): Promise<string> 
     for (const [name, value] of Object.entries(si.fields)) {
       const id = fieldIdByName.get(name);
       // a dropped field would produce an item with no answer — fail loudly
-      if (!id) throw new Error(`seed "${seed.key}": type "${itemType.name}" has no field "${name}"`);
+      if (!id)
+        throw new Error(`seed "${seed.key}": type "${itemType.name}" has no field "${name}"`);
       fieldValues[id] = value;
     }
     const synonyms: Record<string, string[]> = {};

@@ -173,17 +173,22 @@ describe('applyPacket course-plan', () => {
     expect(res.warnings).toEqual([]);
   });
 
-  it('manual mode holds the level, and an explicit autoAdvance wins', async () => {
-    const manual = clonePlan();
-    manual.course.releaseMode = 'manual';
-    const r1 = await applyPacket(parsePacket(manual), NOW);
-    expect((await db.courses.get(r1.courseId))!.levelConfig?.autoAdvance).toBe(false);
-
-    const explicit = clonePlan();
-    explicit.course.autoAdvance = true;
-    const r2 = await applyPacket(parsePacket(explicit), NOW + 1);
-    expect((await db.courses.get(r2.courseId))!.levelConfig?.autoAdvance).toBe(true);
-  });
+  it.each([
+    ['manual', true, false],
+    ['schedule', true, false],
+    ['progress', false, true],
+  ] as const)(
+    '%s release retains authority despite contradictory autoAdvance=%s',
+    async (releaseMode, supplied, expected) => {
+      const packet = clonePlan();
+      packet.course.releaseMode = releaseMode;
+      packet.course.autoAdvance = supplied;
+      const result = await applyPacket(parsePacket(packet), NOW);
+      const imported = await db.courses.get(result.courseId);
+      expect(imported?.levelConfig?.autoAdvance).toBe(expected);
+      expect((await planForCourse(result.courseId))?.releaseMode).toBe(releaseMode);
+    },
+  );
 });
 
 describe('applyPacket propose-items', () => {
@@ -235,7 +240,11 @@ describe('applyPacket propose-items', () => {
         unit: 2,
         items: [
           { type: 'Term', fields: { Term: 'gene', Definition: 'unit of heredity' } },
-          { type: 'Term', fields: { Term: 'fitness', Definition: 'reproductive success' }, level: 9 },
+          {
+            type: 'Term',
+            fields: { Term: 'fitness', Definition: 'reproductive success' },
+            level: 9,
+          },
         ],
       }),
       NOW + 1,

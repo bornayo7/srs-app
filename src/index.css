@@ -2,11 +2,70 @@
 
 :root {
   color-scheme: dark;
+  --color-slate-950: #102228;
+  --color-slate-900: #173038;
+  --color-slate-800: #25404a;
+  --color-slate-700: #3f5b65;
+  --color-slate-600: #8ba0aa;
+  --color-slate-500: #a2b2ba;
+  --color-slate-400: #b9c6cc;
+  --color-slate-300: #d2dce0;
+  --color-slate-200: #e3ebee;
+  --color-slate-100: #f0f6f8;
+  --color-slate-50: #ffffff;
+  --color-violet-950: #133c3b;
+  --color-violet-900: #1f5350;
+  --color-violet-700: #135c58;
+  --color-violet-600: #136c65;
+  --color-violet-500: #197b72;
+  --color-violet-400: #79d2c3;
+  --color-violet-300: #9ee2d5;
+  --color-violet-100: #d6f7ef;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --color-slate-950: #f5f8fa;
+  --color-slate-900: #ffffff;
+  --color-slate-800: #d9e4ea;
+  --color-slate-700: #a3b5bf;
+  --color-slate-600: #536b77;
+  --color-slate-500: #4c6572;
+  --color-slate-400: #405c6a;
+  --color-slate-300: #294957;
+  --color-slate-200: #1e3e4d;
+  --color-slate-100: #153747;
+  --color-slate-50: #102a38;
+  --color-violet-950: #d8f0e9;
+  --color-violet-900: #c8e8dd;
+  --color-violet-400: #17685e;
+  --color-violet-300: #175f60;
+  --color-violet-100: #174d48;
+  --color-rose-950: #ffe4eb;
+  --color-rose-900: #f1b9c8;
+  --color-rose-800: #92304d;
+  --color-rose-400: #aa3154;
+  --color-rose-300: #922442;
+  --color-rose-200: #78213a;
+  --color-rose-100: #78213a;
+  --color-emerald-950: #daf4e9;
+  --color-emerald-900: #a8d9c5;
+  --color-emerald-300: #17694e;
+  --color-amber-950: #fff0c6;
+  --color-amber-900: #dac58b;
+  --color-amber-300: #73530e;
+  --color-amber-200: #73530e;
+  --color-amber-100: #624508;
+  --color-sky-950: #deedf8;
+  --color-sky-900: #b6d0e4;
+  --color-sky-300: #255978;
 }
 
 body {
   @apply bg-slate-950 text-slate-200 antialiased;
   font-family:
+    'Bahnschrift',
+    'Aptos',
     ui-sans-serif,
     system-ui,
     -apple-system,
@@ -14,6 +73,105 @@ body {
     Roboto,
     'Noto Sans JP',
     sans-serif;
+}
+
+body {
+  margin: 0;
+}
+button,
+input,
+select {
+  min-height: 2.5rem;
+}
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+:focus-visible {
+  outline: 3px solid var(--color-violet-400);
+  outline-offset: 3px;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline-offset: 1px;
+}
+button,
+a {
+  touch-action: manipulation;
+}
+input,
+textarea,
+select {
+  max-width: 100%;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+dialog::backdrop {
+  background: rgb(4 17 21 / 0.78);
+  backdrop-filter: blur(3px);
+}
+.app-dialog {
+  margin: auto;
+  padding: 0;
+  width: calc(100% - 1.5rem);
+  max-height: calc(100dvh - 1.5rem);
+  color: var(--color-slate-200);
+  background: transparent;
+  border: 0;
+  overflow: auto;
+}
+.app-dialog > div > div {
+  max-height: min(65dvh, 48rem);
+}
+.study-prompt {
+  font-family: 'Yu Gothic', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.workspace-tabs {
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+  padding: 0.25rem;
+  border-bottom: 1px solid var(--color-slate-800);
+}
+.workspace-tabs a,
+.workspace-tabs button {
+  flex-shrink: 0;
+  border-radius: 0.4rem;
+  padding: 0.6rem 1rem;
+  font-size: 0.875rem;
+  color: var(--color-slate-400);
+}
+.workspace-tabs [aria-current='page'],
+.workspace-tabs [aria-selected='true'] {
+  color: var(--color-violet-300);
+  background: var(--color-slate-800);
+}
+.skip-link {
+  position: fixed;
+  left: 1rem;
+  top: -5rem;
+  z-index: 100;
+  padding: 0.75rem;
+  background: var(--color-slate-900);
+}
+.skip-link:focus {
+  top: 1rem;
+}
+@media (max-width: 480px) {
+  .app-dialog footer > span {
+    flex-basis: 100%;
+  }
+  .workspace-tabs a,
+  .workspace-tabs button {
+    padding: 0.6rem 0.75rem;
+  }
 }
 
 @keyframes shake {
@@ -37,4 +195,14 @@ body {
 
 .animate-shake {
   animation: shake 0.35s ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
 }

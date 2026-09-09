@@ -9,18 +9,18 @@ import { floorToHour, minutesToMs } from '../time';
  *             penalty 2 at/above passesAtIndex, else 1  (WK formula)
  * - past the top stage → burned (dueAt null), or repeat the last interval
  *   forever when the ladder has burning disabled.
- * All due times floor to the top of the hour.
+ * Stages up to one hour keep their exact delay; longer stages align to the hour.
  *
  * A burned card is represented as stageIndex === stages.length.
  */
 /**
- * When a card sitting at `stageIndex` becomes due. Hour-floored (WK behavior)
- * — but never floored into the past: a custom sub-hour stage (e.g. 30m) must
- * keep its real delay. Shared with manual stage setting.
+ * Short practice stages (up to one hour) keep their full elapsed duration.
+ * Longer stages retain hour alignment (WK behavior). Shared with manual changes.
  */
 export function dueForStage(ladder: SrsLadder, stageIndex: number, now: number): number {
   const stage = ladder.stages[Math.min(Math.max(0, stageIndex), ladder.stages.length - 1)];
   const target = now + minutesToMs(stage.intervalMinutes);
+  if (stage.intervalMinutes <= 60) return target;
   const floored = floorToHour(target);
   return floored > now ? floored : target;
 }
@@ -39,7 +39,8 @@ export function makeLadderScheduler(ladder: SrsLadder): Scheduler {
 
     applyReview(srs, outcome, now) {
       if (srs.kind !== 'ladder') throw new Error('ladder scheduler received non-ladder state');
-      if (outcome.kind !== 'ladder') throw new Error('ladder scheduler received non-ladder outcome');
+      if (outcome.kind !== 'ladder')
+        throw new Error('ladder scheduler received non-ladder outcome');
 
       const current = Math.min(srs.stageIndex, top - 1);
       let next: number;

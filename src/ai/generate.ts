@@ -1,7 +1,10 @@
 import { z } from 'zod';
 import { db } from '@/db/db';
+import { sameVersion } from '@/engine/revision';
 import { itemPreview } from '@/engine/grading/context';
-import type { ItemType } from '@/engine/types';
+import type { FieldValue, ItemType } from '@/engine/types';
+import { assertItemContent } from '@/engine/contentValidation';
+import { clozeSummary, isClozeSentences } from '@/engine/grading/cloze';
 import { PACKET_FORMAT, PACKET_VERSION, parsePacket } from '@/packages/schema';
 import type { AddItemsPacket, CreateCoursePacket, PacketItem } from '@/packages/schema';
 import { aiGenerateObject, aiGenerateText } from './client';
@@ -65,6 +68,8 @@ export function toPacketItem(
   templatesByAnswerField: Map<string, string[]>,
   typeName?: string,
 ): PacketItem {
+  const fieldNames = gi.fields.map((f) => f.name.trim().toLowerCase());
+  if (new Set(fieldNames).size !== fieldNames.length) throw new Error('The model repeated a field name. Please generate again.');
   const synonyms: Record<string, string[]> = {};
   for (const f of gi.fields) {
     const alternates = f.alternates.filter((a) => a.trim().length > 0);
@@ -84,19 +89,26 @@ export function toPacketItem(
 }
 
 export function describeType(itemType: ItemType): string {
-  const fields = itemType.fields.map((f) => `"${f.name}" (${f.kind})`).join(', ');
+  const fields = itemType.fields.map((f) => {
+    const representation = f.kind === 'clozeSentences'
+      ? 'one sentence per line, mark the answer with ⟦answer⟧; optional translation follows ::; example: It is ⟦on⟧ the desk. :: Location'
+      : f.kind === 'list' ? 'one value per line, preserving commas inside each value'
+        : f.kind === 'richtext' ? 'readable text or simple HTML; answers are assessed as rendered text'
+          : f.kind;
+    return `"${f.name}" (${representation})`;
+  }).join(', ');
   const templates = itemType.templates
     .map((t) => {
       const name = (id: string) => itemType.fields.find((f) => f.id === id)?.name ?? id;
       const lang = t.grading.mode === 'typed' ? t.grading.answerLang : 'latin';
-      return `"${t.name}": shows [${t.promptFieldIds.map(name).join(', ')}], user types "${name(t.answerFieldId)}" (${lang})`;
+      return `"${t.name}": shows [${t.promptFieldIds.map(name).join(', ')}], ${t.grading.mode === 'choice' ? 'user chooses' : 'user types'} "${name(t.answerFieldId)}" (${lang})`;
     })
     .join('; ');
   return `Item type "${itemType.name}" — fields: ${fields}. Quiz templates — ${templates}.`;
 }
 
 export const ANSWER_RULES = `Rules for good SRS items:
-- Answers are TYPED by the user: keep every answer field short (1-4 words), unambiguous, lowercase unless casing matters.
+- For typed templates, keep answer fields short (1-4 words), unambiguous, lowercase unless casing matters. Choice templates show selectable answers; sentence cloze asks for the marked blank.
 - If a template's answer language is "kana", write that answer field in hiragana/katakana only.
 - The prompt fields must uniquely determine the answer — no trick questions.
 - Per field, "alternates": other phrasings that should also count as a correct typed answer for that field (empty array if none).
@@ -108,6 +120,16 @@ export interface GeneratedItemsResult {
   typeName: string;
 }
 
+export function generationTypeProblem(itemType: ItemType): string | null {
+  return itemType.fields.some((f) => f.kind === 'image' || f.kind === 'audio')
+    ? `"${itemType.name}" needs media attachments. Create these items with the editor or import a package with media.`
+    : null;
+}
+
+export function assertGenerationCount(count: number): void {
+  if (!Number.isInteger(count) || count < 1 || count > 60) throw new Error('Generate between 1 and 60 items at a time.');
+}
+
 /** Generate new items that fit an existing course's item type. */
 export async function generateItems(
   courseId: string,
@@ -115,9 +137,13 @@ export async function generateItems(
   request: string,
   count: number,
 ): Promise<GeneratedItemsResult> {
+  assertGenerationCount(count);
+  if (!request.trim()) throw new Error('Describe the items to generate.');
   const course = await db.courses.get(courseId);
   const itemType = await db.itemTypes.get(typeId);
-  if (!course || !itemType) throw new Error('course or item type not found');
+  if (!course || !itemType || itemType.courseId !== course.id) throw new Error('course or item type not found');
+  const problem = generationTypeProblem(itemType);
+  if (problem) throw new Error(problem);
 
   // duplicate-avoidance context: preview each existing item with ITS OWN type
   const allTypes = await db.itemTypes.where('courseId').equals(courseId).toArray();
@@ -143,6 +169,8 @@ ${existingPreviews.length > 0 ? `The course already contains these items — do 
     user: `Generate exactly ${count} items for: ${request}`,
     maxTokens: 16000,
   });
+  const currentType = await db.itemTypes.get(typeId);
+  if (!currentType || !sameVersion(currentType, itemType)) throw new Error('This item type changed during generation. Generate again using its new fields.');
   if (parsed.items.length === 0) {
     throw new Error('The model returned no usable items — try rephrasing the request.');
   }
@@ -169,6 +197,8 @@ export async function generateCourse(
   count: number,
   ladderPreset: 'classic' | 'gentle' | 'bunpro',
 ): Promise<CreateCoursePacket> {
+  assertGenerationCount(count);
+  if (!request.trim()) throw new Error('Describe the course to generate.');
   const system = `You design complete courses for a spaced-repetition app (like WaniKani/Anki, but for any subject).
 A course has ONE item type with 2-4 named fields, and 1-2 quiz templates. A template shows some fields as the prompt and asks the user to TYPE another field as the answer.
 Design the smallest schema that fits the subject (e.g. language vocab: fields Word/Meaning with a "Meaning" template prompting Word→Meaning, optionally a "Production" template prompting Meaning→Word).
@@ -220,11 +250,20 @@ export async function generateMnemonic(itemId: string): Promise<string> {
   const item = await db.items.get(itemId);
   const itemType = item ? await db.itemTypes.get(item.typeId) : undefined;
   if (!item || !itemType) throw new Error('item not found');
+  return generateMnemonicForContent(itemType, item.fieldValues);
+}
 
+/** Generate from the reviewed draft snapshot; no persistence or UI state is read. */
+export async function generateMnemonicForContent(
+  itemType: ItemType,
+  fieldValues: Record<string, FieldValue>,
+): Promise<string> {
+  const values = assertItemContent(fieldValues, itemType);
   const fieldLines = itemType.fields
     .map((f) => {
-      const v = item.fieldValues[f.id];
-      const text = typeof v === 'string' ? v : Array.isArray(v) ? v.join(', ') : '';
+      const v = values[f.id];
+      if (f.kind === 'image' || f.kind === 'audio') return null;
+      const text = isClozeSentences(v) ? clozeSummary(v) : typeof v === 'string' ? v : Array.isArray(v) ? v.join(', ') : '';
       return text ? `${f.name}: ${text}` : null;
     })
     .filter(Boolean)

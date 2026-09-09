@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { toKana } from 'wanakana';
-import type { Feedback } from '@/stores/sessionStore';
+import type { Feedback } from '@/engine/question';
 
 /**
  * The answer box. One Enter submits; when feedback is showing, the next Enter
@@ -16,18 +16,23 @@ export function TypedInput({
   onContinue,
   answerLang = 'latin',
   placeholder,
+  busy = false,
 }: {
   feedback: Feedback | null;
   onSubmit: (text: string) => void;
   onContinue: () => void;
   answerLang?: 'latin' | 'kana';
   placeholder?: string;
+  busy?: boolean;
 }) {
   const kana = answerLang === 'kana';
   const [text, setText] = useState('');
-  const submit = () => onSubmit(kana ? toKana(text) : text);
+  const submit = () => {
+    if (!busy) onSubmit(kana ? toKana(text) : text);
+  };
   const [shakeNonce, setShakeNonce] = useState(0);
   const ref = useRef<HTMLInputElement>(null);
+  const composing = useRef(false);
   const graded = feedback?.kind === 'correct' || feedback?.kind === 'incorrect';
 
   useEffect(() => {
@@ -59,6 +64,7 @@ export function TypedInput({
       className="w-full"
       onSubmit={(e) => {
         e.preventDefault();
+        if (busy || composing.current) return;
         if (graded) onContinue();
         else submit();
       }}
@@ -76,22 +82,38 @@ export function TypedInput({
             // mid-string edit would rewrite text behind the caret and bounce the
             // caret to the end, so corrections would land in the wrong place.
             const atEnd = e.target.selectionStart === raw.length;
-            setText(kana && atEnd ? toKana(raw, { IMEMode: true }) : raw);
+            setText(kana && atEnd && !composing.current ? toKana(raw, { IMEMode: true }) : raw);
+          }}
+          onCompositionStart={() => {
+            composing.current = true;
+          }}
+          onCompositionEnd={(e) => {
+            composing.current = false;
+            setText(e.currentTarget.value);
           }}
           onKeyDown={(e) => {
             // A native IME (kana/kanji, pinyin, …) uses Enter to commit its
             // composition — that Enter must never submit the half-typed answer.
-            if (e.nativeEvent.isComposing) return;
+            if (e.key !== 'Enter') return;
+            // Prevent implicit form submission for every Enter, including held
+            // keys and composition commit events (Safari also reports keyCode 229).
+            e.preventDefault();
+            if (
+              composing.current ||
+              e.nativeEvent.isComposing ||
+              e.keyCode === 229 ||
+              busy ||
+              e.repeat
+            )
+              return;
             // Explicit Enter handling — implicit form submission is unreliable
             // (no submit button, synthetic events, some mobile keyboards).
             // e.repeat ignored: a held Enter must not submit-and-continue.
-            if (e.key === 'Enter' && !e.repeat) {
-              e.preventDefault();
-              if (graded) onContinue();
-              else submit();
-            }
+            if (graded) onContinue();
+            else submit();
           }}
-          readOnly={graded}
+          readOnly={graded || busy}
+          aria-label="Your answer"
           lang={kana ? 'ja' : undefined}
           placeholder={placeholder ?? (kana ? 'かな (type romaji)' : 'Your answer')}
           autoCapitalize="off"
@@ -102,13 +124,18 @@ export function TypedInput({
         />
       </div>
       {feedback?.kind === 'retry' && (
-        <p className="mt-2 text-center text-sm text-amber-300">
+        <p role="alert" className="mt-2 text-center text-sm text-amber-300">
           {feedback.message ??
             (feedback.reason === 'wrongFacet'
               ? "That's the answer to this item's other question."
               : feedback.reason === 'alphabet'
                 ? 'Check your input language.'
                 : 'Type an answer first.')}
+        </p>
+      )}
+      {busy && (
+        <p role="status" className="mt-2 text-center text-sm">
+          Saving answer…
         </p>
       )}
       <p className="mt-2 text-center text-xs text-slate-500">

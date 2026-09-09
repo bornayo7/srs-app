@@ -1,11 +1,17 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, ensurePresets } from '@/db/db';
 import { createCourse } from '@/db/repo/courses';
 import { createItem, saveItemEdit } from '@/db/repo/items';
 import { basicTypeSpec, createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
 import { newId } from '@/engine/ids';
 import type { Card, Course, Item, ItemType } from '@/engine/types';
-import { createBlankItemType, deleteItemType, saveItemTypeEdit } from './itemTypes';
+import {
+  createBlankItemType,
+  deleteItemType,
+  makeBlankItemType,
+  saveItemTypeEdit,
+} from './itemTypes';
+import { saveLadderEdit } from './ladders';
 import {
   lastManualBatch,
   resetItem,
@@ -16,7 +22,8 @@ import {
   undoManualBatch,
 } from './manualSrs';
 import { dueCards } from '@/db/repo/cards';
-import { completeLessonBatch, nextLessonBatch } from './lessons';
+import { nextLessonBatch } from './lessons';
+import { teachItems as completeLessonBatch } from '@/test/study';
 import { recomputeUnlocks } from './gating';
 
 const NOW = Date.UTC(2026, 0, 15, 10, 23);
@@ -126,7 +133,10 @@ describe('item-type designer — saving migrates existing content', () => {
     await saveItemTypeEdit(withExtra, NOW + 1000);
     expect((await db.items.get(a.id))!.status).toBe('lesson');
 
-    await saveItemTypeEdit({ ...withExtra, templates: type.templates }, NOW + 2000);
+    await saveItemTypeEdit(
+      { ...(await db.itemTypes.get(type.id))!, templates: type.templates },
+      NOW + 2000,
+    );
     expect((await db.items.get(a.id))!.status).toBe('active');
   });
 
@@ -152,7 +162,11 @@ describe('item-type designer — saving migrates existing content', () => {
   it('removing a field drops its values; changing a kind converts them', async () => {
     const { course, type } = await setup(twoCardSpec());
     const item = await createItem(
-      { courseId: course.id, typeId: type.id, fieldValues: values(type, '水', 'water, aqua', 'mizu') },
+      {
+        courseId: course.id,
+        typeId: type.id,
+        fieldValues: values(type, '水', 'water, aqua', 'mizu'),
+      },
       NOW,
     );
     const [word, meaning, reading] = type.fields;
@@ -216,6 +230,27 @@ describe('item-type designer — saving migrates existing content', () => {
 });
 
 describe('item-type lifecycle', () => {
+  it('an unsaved draft is explicit, and saving a deleted rev-zero type cannot resurrect it', async () => {
+    const { course } = await setup();
+    const draft = makeBlankItemType(course.id, NOW);
+    expect(await db.itemTypes.get(draft.id)).toBeUndefined();
+    await saveItemTypeEdit(draft, NOW, { create: true });
+    await deleteItemType(draft.id, NOW);
+    await expect(saveItemTypeEdit(draft, NOW)).rejects.toThrow(/deleted/);
+    expect(await db.itemTypes.get(draft.id)).toBeUndefined();
+  });
+
+  it('deleting the sole selected gate requires an explicit replacement policy', async () => {
+    const { course } = await setup();
+    const gate = await createBlankItemType(course.id, NOW);
+    await db.courses.update(course.id, {
+      levelMode: 'levels',
+      levelConfig: { gateTypeIds: [gate.id], passPercent: 90 },
+    });
+    await expect(deleteItemType(gate.id, NOW)).rejects.toThrow(/only selected gate type/);
+    expect(await db.itemTypes.get(gate.id)).toBeDefined();
+    expect((await db.courses.get(course.id))!.levelConfig!.gateTypeIds).toEqual([gate.id]);
+  });
   it('a new blank type never collides with an existing name', async () => {
     const { course } = await setup();
     const first = await createBlankItemType(course.id, NOW);
@@ -287,6 +322,37 @@ describe('manual SRS control', () => {
     expect(logs[0].prev.dueAt).toBeUndefined();
   });
 
+  it('a locked item cannot be manually taught, burned, or resumed', async () => {
+    const { b } = await seedChain();
+    const card = (await cardsOf(b.id))[0];
+    await expect(setItemStage(b.id, 1, NOW)).rejects.toThrow(/locked/);
+    await expect(setCardManual(card.id, { kind: 'burn' }, NOW)).rejects.toThrow(/locked/);
+    await suspendItem(b.id, NOW);
+    await expect(resumeItem(b.id, NOW)).rejects.toThrow(/locked/);
+    expect((await db.cards.get(card.id))!.state).toBe('suspended');
+  });
+
+  it('manual batch undo leaves every member unchanged when just one is stale', async () => {
+    const { course, type } = await setup(twoCardSpec());
+    const item = await createItem(
+      {
+        courseId: course.id,
+        typeId: type.id,
+        fieldValues: values(type, 'word', 'meaning', 'reading'),
+      },
+      NOW,
+    );
+    const batch = await setItemStage(item.id, 2, NOW);
+    const cards = await cardsOf(item.id);
+    await setCardManual(cards[0].id, { kind: 'setStage', stageIndex: 5 }, NOW);
+    const before = await cardsOf(item.id);
+    expect(await undoManualBatch(batch.sessionId, NOW)).toBe(0);
+    expect(await cardsOf(item.id)).toEqual(before);
+    expect(
+      (await db.reviewLogs.toArray()).filter((l) => l.sessionId === batch.sessionId),
+    ).toHaveLength(2);
+  });
+
   it('promoting an item to the pass stage unlocks what depends on it', async () => {
     const { a, b } = await seedChain();
     expect((await db.items.get(b.id))!.status).toBe('locked');
@@ -319,7 +385,10 @@ describe('manual SRS control', () => {
     expect(await undoManualBatch(batch!.sessionId, NOW + 2000)).toBe(1);
 
     const card = (await cardsOf(a.id))[0];
-    expect(card).toMatchObject({ state: 'review', srs: { kind: 'ladder', stageIndex: PASS_STAGE } });
+    expect(card).toMatchObject({
+      state: 'review',
+      srs: { kind: 'ladder', stageIndex: PASS_STAGE },
+    });
     // passedAt is re-derived from the restored cards, so the dependent reopens
     expect((await db.items.get(a.id))!.passedAt).not.toBeNull();
     expect((await db.items.get(b.id))!.status).toBe('lesson');
@@ -350,6 +419,56 @@ describe('manual SRS control', () => {
     const card = (await cardsOf(a.id))[0];
     expect(card.state).toBe('burned');
     expect(card.dueAt).toBeUndefined();
+  });
+});
+
+describe('ladder mutation owns its derived state', () => {
+  it('lowering the pass stage settles passes and dependencies immediately', async () => {
+    const { course, type } = await setup();
+    const a = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, 'A', 'answer') },
+      NOW,
+    );
+    const b = await createItem(
+      {
+        courseId: course.id,
+        typeId: type.id,
+        fieldValues: values(type, 'B', 'other'),
+        prereqIds: [a.id],
+      },
+      NOW,
+    );
+    await setItemStage(a.id, 2, NOW);
+    const ladder = (await db.ladders.get(
+      course.scheduling.kind === 'ladder' ? course.scheduling.ladderId : '',
+    ))!;
+    await saveLadderEdit({ ...ladder, passesAtIndex: 2 }, NOW);
+    expect((await db.items.get(a.id))!.passedAt).not.toBeNull();
+    expect((await db.items.get(b.id))!.status).toBe('lesson');
+  });
+
+  it('failed gating settlement rolls back the ladder and card revisions together', async () => {
+    const { course, type } = await setup();
+    const item = await createItem(
+      { courseId: course.id, typeId: type.id, fieldValues: values(type, 'A', 'answer') },
+      NOW,
+    );
+    await setItemStage(item.id, 2, NOW);
+    const ladder = (await db.ladders.get(
+      course.scheduling.kind === 'ladder' ? course.scheduling.ladderId : '',
+    ))!;
+    const before = await cardsOf(item.id);
+    const spy = vi.spyOn(db.items, 'put').mockRejectedValueOnce(new Error('Storage failed'));
+    try {
+      await expect(saveLadderEdit({ ...ladder, passesAtIndex: 2 }, NOW)).rejects.toThrow(
+        /Storage failed/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.ladders.get(ladder.id)).toEqual(ladder);
+    expect(await cardsOf(item.id)).toEqual(before);
+    expect((await db.items.get(item.id))!.passedAt).toBeNull();
   });
 });
 

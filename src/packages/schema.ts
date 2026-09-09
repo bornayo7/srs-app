@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { BASE64_PATTERN, MEDIA_MIME_PATTERN } from '../db/blobCodec';
+import { parseReleaseAt } from '../services/releaseDates';
+export { parseReleaseAt } from '../services/releaseDates';
 
 /**
  * The srs-packet format: one JSON shape, three producers — the MCP server,
@@ -18,10 +21,11 @@ import { z } from 'zod';
  */
 
 export const PACKET_FORMAT = 'srs-packet' as const;
-export const PACKET_VERSION = 1 as const;
+export const PACKET_VERSION = 2 as const;
+const packetVersion = z.union([z.literal(1), z.literal(2)]);
 
 const clozeSentence = z.object({
-  text: z.string().min(1), // blank marked ⟦like this⟧
+  text: z.string().trim().min(1), // blank marked ⟦like this⟧
   translation: z.string().optional(),
   hint: z.string().optional(),
 });
@@ -32,7 +36,7 @@ export const packetItemSchema = z.object({
   /** ItemType NAME; may be omitted when the course has exactly one type. */
   type: z.string().optional(),
   /** Local handle other items in this packet can list as a prerequisite. */
-  key: z.string().min(1).optional(),
+  key: z.string().trim().min(1).optional(),
   /**
    * Prerequisites: `key`s of earlier items in this packet (or existing item
    * ids). The item stays locked until all of them reach the pass stage.
@@ -45,20 +49,24 @@ export const packetItemSchema = z.object({
    * record form maps template NAME → synonyms.
    */
   synonyms: z.union([z.array(z.string()), z.record(z.string(), z.array(z.string()))]).optional(),
+  blockList: z.record(z.string(), z.array(z.string())).optional(),
+  guidance: z.record(z.string(), z.array(z.object({ text: z.string(), message: z.string() }))).optional(),
   note: z.string().optional(),
   level: z.number().int().min(1).optional(),
 });
 export type PacketItem = z.infer<typeof packetItemSchema>;
 
 export const packetTemplateSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().trim().min(1),
   promptFields: z.array(z.string()).min(1),
-  answerField: z.string().min(1),
+  answerField: z.string().trim().min(1),
   /**
    * 'typed' (default) asks the learner to type the answer; 'choice' shows
    * buttons, with the wrong options taken from other items of the same type.
    */
-  mode: z.enum(['typed', 'choice']).optional(),
+  mode: z.enum(['typed', 'choice', 'sentenceCloze']).optional(),
+  hintFields: z.array(z.string()).optional(),
+  rotation: z.enum(['random', 'sequential']).optional(),
   /** Options shown in 'choice' mode, 2–6 (default 4). */
   choices: z.number().int().min(2).max(6).optional(),
   answerLang: z.enum(['latin', 'kana']).optional(), // default latin
@@ -66,14 +74,14 @@ export const packetTemplateSchema = z.object({
 });
 
 export const packetItemTypeSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().trim().min(1),
   icon: z.string().optional(),
   color: z.string().optional(),
   fields: z
     .array(
       z.object({
-        name: z.string().min(1),
-        kind: z.enum(['text', 'list', 'clozeSentences']).optional(),
+        name: z.string().trim().min(1),
+        kind: z.enum(['text', 'richtext', 'image', 'audio', 'list', 'clozeSentences']).optional(),
       }),
     )
     .min(1),
@@ -83,7 +91,7 @@ export const packetItemTypeSchema = z.object({
 function findDuplicate(names: string[]): string | null {
   const seen = new Set<string>();
   for (const n of names) {
-    const key = n.toLowerCase();
+    const key = n.trim().toLowerCase();
     if (seen.has(key)) return n;
     seen.add(key);
   }
@@ -92,7 +100,7 @@ function findDuplicate(names: string[]): string | null {
 
 /** Course settings shared by every course-creating kind. */
 const courseSpecSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().trim().min(1),
   description: z.string().optional(),
   /** Built-in ladder preset; default classic. */
   ladderPreset: z.enum(['classic', 'gentle', 'bunpro']).optional(),
@@ -102,27 +110,20 @@ const courseSpecSchema = z.object({
   levelMode: z.enum(['flat', 'levels']).optional(),
   /** Item type NAMES whose passing drives level-ups (default: all types). */
   gateTypes: z.array(z.string()).optional(),
-  passPercent: z.number().int().min(1).max(100).optional(),
+  passPercent: z.number().min(1).max(100).optional(),
   /**
    * Levels only. false = the level never advances on its own (a plan's
    * manual/scheduled release owns it). Default true.
    */
   autoAdvance: z.boolean().optional(),
+  ghosts: z.enum(['off', 'minimal', 'on']).optional(),
+  answerStyle: z.literal('perTemplate').optional(),
 });
-
-export const createCoursePacketSchema = z.object({
-  format: z.literal(PACKET_FORMAT),
-  version: z.literal(PACKET_VERSION),
-  kind: z.literal('create-course'),
-  course: courseSpecSchema,
-  itemTypes: z.array(packetItemTypeSchema).min(1),
-  items: z.array(packetItemSchema),
-});
-export type CreateCoursePacket = z.infer<typeof createCoursePacketSchema>;
 
 export const addItemsPacketSchema = z.object({
   format: z.literal(PACKET_FORMAT),
-  version: z.literal(PACKET_VERSION),
+  version: packetVersion,
+  id: z.string().trim().min(1).optional(),
   kind: z.literal('add-items'),
   /** Target course — by id (preferred, from snapshot.json) or by exact name. */
   courseId: z.string().optional(),
@@ -134,14 +135,14 @@ export type AddItemsPacket = z.infer<typeof addItemsPacketSchema>;
 // ---------- P4: course plans + the review queue ----------
 
 /** ISO date / date-time string, or epoch ms. */
-const releaseAtSchema = z.union([z.string().min(1), z.number()]);
+const releaseAtSchema = z.union([z.string().trim().min(1), z.number()]);
 
 export const packetUnitSchema = z.object({
-  title: z.string().min(1),
+  title: z.string().trim().min(1),
   summary: z.string().optional(),
   topics: z.array(z.string()).optional(),
   /** Suggested number of items for this unit (drives generation). */
-  targetCount: z.number().int().min(0).optional(),
+  targetCount: z.number().int().min(0).max(60).optional(),
   /** When this unit opens (schedule release mode), e.g. "2026-09-15". */
   releaseAt: releaseAtSchema.optional(),
   /** Proposed items — they land in the review queue, not the course. */
@@ -149,9 +150,34 @@ export const packetUnitSchema = z.object({
 });
 export type PacketUnit = z.infer<typeof packetUnitSchema>;
 
+export const createCoursePacketSchema = z.object({
+  format: z.literal(PACKET_FORMAT),
+  version: packetVersion,
+  id: z.string().trim().min(1).optional(),
+  kind: z.literal('create-course'),
+  course: courseSpecSchema,
+  itemTypes: z.array(packetItemTypeSchema).min(1),
+  items: z.array(packetItemSchema),
+  /** Version 2 content extensions. No progress or device configuration. */
+  ladder: z.object({
+    name: z.string().trim().min(1),
+    stages: z.array(z.object({ name: z.string().trim().min(1), intervalMinutes: z.number().positive() })).min(1),
+    passesAtIndex: z.number().int().min(0),
+    burnEnabled: z.boolean(),
+  }).optional(),
+  media: z.array(z.object({ key: z.string().min(1), name: z.string(), mimeType: z.string().regex(MEDIA_MIME_PATTERN, 'Unsupported media type: use image or audio.'), data: z.string().regex(BASE64_PATTERN, 'Invalid base64 media.') })).optional(),
+  plan: z.object({
+    title: z.string().trim().min(1), material: z.string(), materialTruncated: z.boolean(),
+    releaseMode: z.enum(['progress', 'schedule', 'manual']),
+    units: z.array(packetUnitSchema.omit({ items: true })).min(1),
+  }).optional(),
+});
+export type CreateCoursePacket = z.infer<typeof createCoursePacketSchema>;
+
 export const coursePlanPacketSchema = z.object({
   format: z.literal(PACKET_FORMAT),
-  version: z.literal(PACKET_VERSION),
+  version: packetVersion,
+  id: z.string().trim().min(1).optional(),
   kind: z.literal('course-plan'),
   course: courseSpecSchema.extend({
     /**
@@ -166,12 +192,14 @@ export const coursePlanPacketSchema = z.object({
   units: z.array(packetUnitSchema).min(1),
   /** The source material the plan was built from (kept for later generation). */
   material: z.string().optional(),
+  materialTruncated: z.boolean().optional(),
 });
 export type CoursePlanPacket = z.infer<typeof coursePlanPacketSchema>;
 
 export const proposeItemsPacketSchema = z.object({
   format: z.literal(PACKET_FORMAT),
-  version: z.literal(PACKET_VERSION),
+  version: packetVersion,
+  id: z.string().trim().min(1).optional(),
   kind: z.literal('propose-items'),
   courseId: z.string().optional(),
   courseName: z.string().optional(),
@@ -180,14 +208,6 @@ export const proposeItemsPacketSchema = z.object({
   items: z.array(packetItemSchema).min(1),
 });
 export type ProposeItemsPacket = z.infer<typeof proposeItemsPacketSchema>;
-
-/** Resolve a unit's releaseAt to epoch ms; null when absent or unreadable. */
-export function parseReleaseAt(v: string | number | undefined): number | null {
-  if (v === undefined) return null;
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  const ms = Date.parse(v);
-  return Number.isNaN(ms) ? null : ms;
-}
 
 type AnyPacket =
   | z.infer<typeof createCoursePacketSchema>
@@ -245,8 +265,9 @@ export const packetSchema = z
       }
     }
 
-    if (packet.kind === 'course-plan') {
-      for (const [i, unit] of packet.units.entries()) {
+    const units = packet.kind === 'course-plan' ? packet.units : packet.kind === 'create-course' ? packet.plan?.units ?? [] : [];
+    {
+      for (const [i, unit] of units.entries()) {
         if (unit.releaseAt !== undefined && parseReleaseAt(unit.releaseAt) === null) {
           ctx.addIssue({
             code: 'custom',
@@ -258,6 +279,12 @@ export const packetSchema = z
     }
 
     if (!createsCourse) return;
+
+    if (packet.kind === 'create-course') {
+      if (packet.ladder && packet.ladder.passesAtIndex >= packet.ladder.stages.length) ctx.addIssue({ code: 'custom', path: ['ladder', 'passesAtIndex'], message: 'Pass stage must belong to the ladder.' });
+      const mediaKeys = (packet.media ?? []).map((asset) => asset.key);
+      if (new Set(mediaKeys).size !== mediaKeys.length) ctx.addIssue({ code: 'custom', path: ['media'], message: 'Media keys must be unique.' });
+    }
 
     const typeNames = new Set(packet.itemTypes.map((t) => t.name.toLowerCase()));
     for (const gate of packet.course.gateTypes ?? []) {
@@ -286,6 +313,14 @@ export const packetSchema = z
           path: ['itemTypes', i, 'fields'],
           message: `duplicate field name "${dupField}" in type "${t.name}"`,
         });
+      }
+      const fieldByName = new Map(t.fields.map((field) => [field.name.toLowerCase(), field]));
+      for (const template of t.templates) {
+        for (const ref of [...template.promptFields, ...(template.hintFields ?? []), template.answerField]) {
+          if (!fieldByName.has(ref.toLowerCase())) ctx.addIssue({ code: 'custom', path: ['itemTypes', i, 'templates'], message: `Template "${template.name}" references unknown field "${ref}".` });
+        }
+        if (template.promptFields.some((name) => name.toLowerCase() === template.answerField.toLowerCase())) ctx.addIssue({ code: 'custom', path: ['itemTypes', i, 'templates'], message: `Template "${template.name}" would show its own answer.` });
+        if (template.mode === 'sentenceCloze' && fieldByName.get(template.answerField.toLowerCase())?.kind !== 'clozeSentences') ctx.addIssue({ code: 'custom', path: ['itemTypes', i, 'templates'], message: 'Sentence cloze requires a clozeSentences answer field.' });
       }
       const dupTpl = findDuplicate(t.templates.map((tpl) => tpl.name));
       if (dupTpl) {

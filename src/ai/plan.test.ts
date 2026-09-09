@@ -3,7 +3,7 @@ import { db, ensurePresets } from '@/db/db';
 import { planForCourse } from '@/db/repo/plans';
 import { proposalsForCourse } from '@/db/repo/proposals';
 import type { ItemType, Proposal } from '@/engine/types';
-import { createPlannedCourse } from '@/services/plans';
+import { appendUnit, createPlannedCourse, updateUnit } from '@/services/plans';
 import { acceptProposals, rejectProposals } from '@/services/proposals';
 import { aiGenerateObject } from './client';
 import {
@@ -35,17 +35,27 @@ const outline: PlannedOutline = {
       name: 'Term',
       icon: '🧬',
       fields: [{ name: 'Term' }, { name: 'Definition' }],
-      templates: [{ name: 'Define', promptFields: ['Term'], answerField: 'Definition', mode: 'typed' }],
+      templates: [
+        { name: 'Define', promptFields: ['Term'], answerField: 'Definition', mode: 'typed' },
+      ],
     },
     {
       name: 'Question',
       icon: '❓',
       fields: [{ name: 'Question' }, { name: 'Answer' }],
-      templates: [{ name: 'Answer', promptFields: ['Question'], answerField: 'Answer', mode: 'choice' }],
+      templates: [
+        { name: 'Answer', promptFields: ['Question'], answerField: 'Answer', mode: 'choice' },
+      ],
     },
   ],
   units: [
-    { title: 'Cells', summary: 'Structure.', topics: ['membrane', ' organelles '], targetCount: 12, date: '2026-09-02' },
+    {
+      title: 'Cells',
+      summary: 'Structure.',
+      topics: ['membrane', ' organelles '],
+      targetCount: 12,
+      date: '2026-09-02',
+    },
     { title: 'Genetics', summary: '', topics: [], targetCount: 0, date: '' },
   ],
 };
@@ -79,7 +89,7 @@ describe('pure helpers', () => {
       targetCount: 12,
       releaseAt: Date.parse('2026-09-02'),
     });
-    expect(input.units[1]).toEqual({ title: 'Genetics', summary: '', topics: [], targetCount: 10 });
+    expect(input.units[1]).toEqual({ title: 'Genetics', summary: '', topics: [], targetCount: 0 });
     expect(input.materialTruncated).toBe(true);
     expect(input.passPercent).toBe(80);
   });
@@ -100,6 +110,8 @@ describe('unitItemsToPacketItems', () => {
   const types: ItemType[] = [
     {
       id: 't1',
+      rev: 0,
+      generation: 'legacy',
       courseId: 'c',
       name: 'Term',
       color: '#000',
@@ -122,6 +134,8 @@ describe('unitItemsToPacketItems', () => {
     },
     {
       id: 't2',
+      rev: 0,
+      generation: 'legacy',
       courseId: 'c',
       name: 'Question',
       color: '#000',
@@ -238,7 +252,9 @@ describe('planCourse', () => {
 describe('generateUnitItems', () => {
   async function plannedCourse() {
     const res = await createPlannedCourse(
-      outlineToPlannedCourse(outline, 'Week 1: the cell membrane…', false, { releaseMode: 'manual' }),
+      outlineToPlannedCourse(outline, 'Week 1: the cell membrane…', false, {
+        releaseMode: 'manual',
+      }),
       NOW,
     );
     return res.courseId;
@@ -275,8 +291,16 @@ describe('generateUnitItems', () => {
     const pending = await proposalsForCourse(courseId, 'pending');
     expect(pending).toHaveLength(2);
     expect(pending.every((p) => p.level === 2 && p.source === 'ai' && p.error === null)).toBe(true);
-    expect(pending[0].item).toMatchObject({ type: 'Term', key: 'gene', synonyms: { Define: ['heredity unit'] } });
-    expect(pending[1].item).toMatchObject({ type: 'Question', prereqs: ['gene'], note: expect.stringContaining('archiving') });
+    expect(pending[0].item).toMatchObject({
+      type: 'Term',
+      key: 'gene',
+      synonyms: { Define: ['heredity unit'] },
+    });
+    expect(pending[1].item).toMatchObject({
+      type: 'Question',
+      prereqs: ['gene'],
+      note: expect.stringContaining('archiving'),
+    });
     expect((await planForCourse(courseId))!.units[1].generatedAt).toBe(NOW + 5);
     expect((await planForCourse(courseId))!.units[0].generatedAt).toBeUndefined();
 
@@ -336,7 +360,12 @@ describe('generateUnitItems', () => {
         },
       ],
     });
-    const res = await generateUnitItems(courseId, 1, { instruction: 'focus on transport' }, NOW + 4);
+    const res = await generateUnitItems(
+      courseId,
+      1,
+      { instruction: 'focus on transport' },
+      NOW + 4,
+    );
     expect(res.proposalsAdded).toBe(1);
     const user = mockedAi.mock.calls[1][1].user;
     expect(user).toContain('Write exactly 12 items'); // the unit's targetCount
@@ -345,10 +374,14 @@ describe('generateUnitItems', () => {
     expect(user).toContain('Extra instructions: focus on transport');
     // the same system prompt both times — the cached prefix must not drift
     expect(mockedAi.mock.calls[1][1].system).toBe(mockedAi.mock.calls[0][1].system);
-    expect(mockedAi.mock.calls[1][1].cacheableSystem).toBe(mockedAi.mock.calls[0][1].cacheableSystem);
+    expect(mockedAi.mock.calls[1][1].cacheableSystem).toBe(
+      mockedAi.mock.calls[0][1].cacheableSystem,
+    );
 
     // and accepting the new one resolves its prerequisite to the accepted item
-    const osmosis = (await proposalsForCourse(courseId, 'pending')).find((p) => p.item.fields.Term === 'osmosis')!;
+    const osmosis = (await proposalsForCourse(courseId, 'pending')).find(
+      (p) => p.item.fields.Term === 'osmosis',
+    )!;
     const accepted = await acceptProposals([osmosis.id], NOW + 5);
     const membraneItemId = (await db.proposals.get(membrane.id))!.acceptedItemId;
     expect((await db.items.get(accepted.itemIds[0]))!.prereqIds).toEqual([membraneItemId]);
@@ -392,5 +425,64 @@ describe('generateUnitItems', () => {
     const courseId = await plannedCourse();
     await expect(generateUnitItems(courseId, 9, {}, NOW)).rejects.toThrow(/unit not found/);
     expect(mockedAi).not.toHaveBeenCalled();
+  });
+
+  it('holds a generated result when its target unit changed during the network call', async () => {
+    const courseId = await plannedCourse();
+    mockedAi.mockImplementationOnce(async () => {
+      await updateUnit(courseId, 1, { title: 'Revised topic' }, NOW + 1);
+      return {
+        items: [
+          {
+            type: 'Term',
+            key: '',
+            prereqs: [],
+            fields: [
+              { name: 'Term', value: 'cell', alternates: [] },
+              { name: 'Definition', value: 'unit of life', alternates: [] },
+            ],
+            note: '',
+          },
+        ],
+      };
+    });
+    await expect(generateUnitItems(courseId, 1, { count: 1 }, NOW + 2)).rejects.toThrow(
+      'changed during generation',
+    );
+    expect(await db.proposals.count()).toBe(0);
+    expect((await planForCourse(courseId))!.units[0]).toMatchObject({ title: 'Revised topic' });
+    expect((await planForCourse(courseId))!.units[0].generatedAt).toBeUndefined();
+  });
+
+  it('preserves an unrelated unit edit and append while committing generated proposals', async () => {
+    const courseId = await plannedCourse();
+    mockedAi.mockImplementationOnce(async () => {
+      await updateUnit(courseId, 2, { title: 'Revised genetics' }, NOW + 1);
+      await appendUnit(
+        courseId,
+        { title: 'Evolution', summary: '', topics: [], targetCount: 4 },
+        NOW + 1,
+      );
+      return {
+        items: [
+          {
+            type: 'Term',
+            key: '',
+            prereqs: [],
+            fields: [
+              { name: 'Term', value: 'cell', alternates: [] },
+              { name: 'Definition', value: 'unit of life', alternates: [] },
+            ],
+            note: '',
+          },
+        ],
+      };
+    });
+    await expect(generateUnitItems(courseId, 1, { count: 1 }, NOW + 2)).resolves.toMatchObject({
+      proposalsAdded: 1,
+    });
+    const units = (await planForCourse(courseId))!.units;
+    expect(units.map((unit) => unit.title)).toEqual(['Cells', 'Revised genetics', 'Evolution']);
+    expect(units[0].generatedAt).toBe(NOW + 2);
   });
 });

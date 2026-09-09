@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/db/db';
-import { Badge, Button, Select } from '@/components/ui';
+import { Badge, Button, Select, Status } from '@/components/ui';
+import { useOperation } from '@/hooks/useOperation';
 import { formatDuration } from '@/engine/time';
 import { useNowTick } from '@/hooks/useNowTick';
 import type { Item, ItemType, SrsLadder } from '@/engine/types';
@@ -31,33 +32,23 @@ export function SrsControls({
   ladder: SrsLadder | null;
 }) {
   const t = useNowTick(60_000);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
+  const operation = useOperation();
+  const { busy } = operation;
   const [bulkStage, setBulkStage] = useState(0);
 
   const cards = useLiveQuery(
-    async () => (await db.cards.where('itemId').equals(item.id).toArray()).filter((c) => !c.isGhost),
+    async () =>
+      (await db.cards.where('itemId').equals(item.id).toArray()).filter((c) => !c.isGhost),
     [item.id],
   );
-  const undoable = useLiveQuery(() => lastManualBatch(item.id), [item.id, message]);
+  const undoable = useLiveQuery(() => lastManualBatch(item.id), [item.id, operation.message]);
 
   if (!ladder) {
     return <p className="text-sm text-slate-500">Manual stage control needs a ladder scheduler.</p>;
   }
   const options = stageOptions(ladder);
 
-  async function act(fn: () => Promise<unknown>, label: string) {
-    setBusy(true);
-    setMessage('');
-    try {
-      await fn();
-      setMessage(label);
-    } catch (err) {
-      setMessage((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const act = operation.run;
 
   const cardAction = (cardId: string, action: ManualAction, label: string) =>
     act(() => setCardManual(cardId, action, now()), label);
@@ -102,9 +93,10 @@ export function SrsControls({
               <span className="text-xs text-slate-600">
                 {card.stats.reviews} reviews · {card.stats.lapses} lapses
               </span>
-              <div className="ml-auto flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5 sm:ml-auto">
                 <Select
                   disabled={busy}
+                  aria-label={`Stage for ${template?.name ?? 'card'}`}
                   value={stageIndex ?? ''}
                   onChange={(e) =>
                     void cardAction(
@@ -115,7 +107,9 @@ export function SrsControls({
                   }
                   title="Move this card to a specific stage"
                 >
-                  <option value="">set stage…</option>
+                  <option value="" disabled>
+                    set stage…
+                  </option>
                   {options.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
@@ -152,7 +146,12 @@ export function SrsControls({
       </ul>
 
       <div className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
-        <Select value={bulkStage} onChange={(e) => setBulkStage(+e.target.value)}>
+        <Select
+          aria-label="Stage for every card"
+          disabled={busy}
+          value={bulkStage}
+          onChange={(e) => setBulkStage(+e.target.value)}
+        >
           {options.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
@@ -161,7 +160,9 @@ export function SrsControls({
         </Select>
         <Button
           disabled={busy}
-          onClick={() => void act(() => setItemStage(item.id, bulkStage, now()), 'All cards moved.')}
+          onClick={() =>
+            void act(() => setItemStage(item.id, bulkStage, now()), 'All cards moved.')
+          }
         >
           Set every card
         </Button>
@@ -179,14 +180,20 @@ export function SrsControls({
             disabled={busy}
             title={`Undo the manual change from ${new Date(undoable.ts).toLocaleString()}`}
             onClick={() =>
-              void act(() => undoManualBatch(undoable.sessionId, now()), 'Manual change undone.')
+              void act(async () => {
+                const count = await undoManualBatch(undoable.sessionId, now());
+                if (!count)
+                  throw new Error(
+                    'These cards changed after that action. Their newer progress was kept.',
+                  );
+              }, 'Manual change undone.')
             }
           >
             ↩ Undo last manual change
           </Button>
         )}
       </div>
-      {message && <p className="text-xs text-slate-400">{message}</p>}
+      <Status {...operation} />
       <p className="text-[11px] text-slate-600">
         Manual changes are logged like reviews (with the previous state), and passing an item here
         unlocks whatever depends on it.

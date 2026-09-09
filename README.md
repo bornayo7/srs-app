@@ -10,7 +10,7 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
 ## Features
 
 - **WaniKani-style SRS**: editable stage ladders (Classic 4h→4mo with burning, Gentle,
-  Bunpro-like), hour-aligned due times, wrong answers drop stages by the real WK formula
+  Bunpro-like), exact delays through 60 minutes and hour-aligned longer stages, stage drops on wrong answers
 - **Prerequisite gating & levels**: items unlock only when their prerequisites *pass*
   (radical → kanji → vocab), and levels advance when enough of the level's gate items pass
 - **Item-type designer**: build your own content model per course — fields (text, rich text,
@@ -50,13 +50,26 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
 ## Run it
 
 ```bash
-npm install
+npm ci             # Node 24; installs both the app and MCP workspace
 npm run dev        # http://localhost:5173
-npm test           # engine + service test suite
+npm test           # engine, database, component and adapter behavior
+npm run check      # app + MCP typechecks, all tests, production build
 npm run build      # production PWA build
 ```
 
 Chrome/Edge recommended (the MCP exchange folder uses the File System Access API).
+File and paste imports work without a connected folder. See [recovery and release checks](docs/RECOVERY_AND_RELEASE.md).
+
+## Backups and sharing
+
+Full backups contain study progress, history, media, plans, drafts and delivery receipts.
+Restoring validates the entire file before replacing study data and leaves this device's AI
+credentials, provider destinations and exchange connection intact. Restore cancels old undo
+authority and makes edits or reviews prepared in another tab stale.
+
+Course packages share supported learning content, exact ladders, media, grading rules and
+release plans; they start with fresh study progress. Self grading, plain cloze, FSRS and
+reveal-style scheduling are not available study modes and are rejected with repair guidance.
 
 ## AI setup
 
@@ -70,9 +83,9 @@ the Inbox. See [srs-mcp/README.md](srs-mcp/README.md).
 - `src/engine/` — pure TypeScript: schedulers, grading pipeline, gating/levels, queue, forecast
   (the test target)
 - `src/db/` — Dexie (IndexedDB) schema, repos, backup import/export
-- `src/services/` — transactional write paths (`commitReview` is the one place reviews commit)
+- `src/services/` — transactional write paths; expected revisions and lifetime identities prevent stale writes
 - `src/services/plans.ts`, `proposals.ts` — course plans (units = levels, release modes) and the
-  AI review queue; `src/ai/plan.ts` — the two-stage planner (outline, then one unit at a time)
+  AI review queue; `src/ai/plan.ts` / `generateUnit.ts` — outline design and guarded unit generation
 - `src/packages/` — the `srs-packet` format: one validated JSON shape shared by MCP, AI
   generation, and file import
 - `src/exchange/` — snapshot + inbox folder bridge to the MCP server

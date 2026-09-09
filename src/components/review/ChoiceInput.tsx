@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ChoiceOption } from '@/engine/grading/choice';
-import type { Feedback } from '@/stores/sessionStore';
+import type { Feedback } from '@/engine/question';
 
 /**
  * Multiple choice. Clicking (or pressing 1–6) submits the option's text through
@@ -12,11 +12,13 @@ export function ChoiceInput({
   feedback,
   onSubmit,
   onContinue,
+  busy = false,
 }: {
   options: ChoiceOption[];
   feedback: Feedback | null;
   onSubmit: (text: string) => void;
   onContinue: () => void;
+  busy?: boolean;
 }) {
   const [picked, setPicked] = useState<number | null>(null);
   const graded = feedback?.kind === 'correct' || feedback?.kind === 'incorrect';
@@ -29,10 +31,11 @@ export function ChoiceInput({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (busy || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         if (graded) onContinue();
+        else if (feedback?.kind === 'retry' && picked !== null) onSubmit(options[picked].text);
         return;
       }
       const n = Number(e.key);
@@ -44,7 +47,7 @@ export function ChoiceInput({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [graded, options, onSubmit, onContinue]);
+  }, [graded, options, onSubmit, onContinue, busy, feedback, picked]);
 
   const tone = (index: number, option: ChoiceOption): string => {
     if (!graded) {
@@ -66,7 +69,7 @@ export function ChoiceInput({
           <button
             key={`${i}:${option.text}`}
             type="button"
-            disabled={graded}
+            disabled={graded || busy}
             onClick={() => {
               setPicked(i);
               onSubmit(option.text);
@@ -80,10 +83,21 @@ export function ChoiceInput({
           </button>
         ))}
       </div>
+      {feedback?.kind === 'retry' && (
+        <p role="alert" className="mt-2 text-center text-sm text-amber-300">
+          {feedback.message ?? 'Choose an answer again.'}
+        </p>
+      )}
+      {busy && (
+        <p role="status" className="mt-2 text-center text-sm">
+          Saving answer…
+        </p>
+      )}
       {graded && (
         <button
           type="button"
           onClick={onContinue}
+          disabled={busy}
           className="mt-3 w-full rounded-xl border-2 border-slate-700 bg-slate-900 py-2 text-sm text-slate-300 hover:border-violet-500"
         >
           Continue (Enter)

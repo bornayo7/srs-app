@@ -1,3 +1,4 @@
+import Dexie from 'dexie';
 import { db } from '@/db/db';
 import { newId } from '@/engine/ids';
 import { fitWithin, MAX_IMAGE_DIM } from '@/engine/image';
@@ -59,14 +60,13 @@ export async function ingestImage(file: File, now: number): Promise<MediaAsset> 
   // SVG is already tiny and vector — rasterizing it would only lose quality;
   // a GIF may be animated, and a re-encode keeps only its first frame
   if (file.type !== 'image/svg+xml' && file.type !== 'image/gif') {
+    let bitmap: ImageBitmap | undefined;
     try {
-      const bitmap = await decode(file);
+      bitmap = await decode(file);
       const size = fitWithin(bitmap.width, bitmap.height, MAX_IMAGE_DIM);
       const canvas = makeCanvas(size.width, size.height);
       const ctx = canvas.getContext('2d') as
-        | CanvasRenderingContext2D
-        | OffscreenCanvasRenderingContext2D
-        | null;
+        CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
       if (ctx) {
         ctx.drawImage(bitmap, 0, 0, size.width, size.height);
         const encoded = await canvasToBlob(canvas, 'image/webp', 0.85);
@@ -76,9 +76,10 @@ export async function ingestImage(file: File, now: number): Promise<MediaAsset> 
           mimeType = 'image/webp';
         }
       }
-      bitmap.close();
     } catch {
       // decoding failed (exotic format, memory) — store the original as-is
+    } finally {
+      bitmap?.close();
     }
   }
 
@@ -110,13 +111,24 @@ export async function ingestAudio(file: File, now: number): Promise<MediaAsset> 
 // Object URLs live for the page's lifetime: media is small, and revoking one
 // still displayed elsewhere would blank the image.
 const urlCache = new Map<string, string>();
+let urlGeneration = 0;
+
+/** A restored database may reuse ids for different bytes. */
+export function clearMediaUrlCache(): void {
+  urlGeneration++;
+  for (const url of urlCache.values()) URL.revokeObjectURL(url);
+  urlCache.clear();
+}
 
 export async function mediaUrl(id: string): Promise<string | null> {
   if (!id) return null;
   const cached = urlCache.get(id);
   if (cached) return cached;
+  const generation = urlGeneration;
   const asset = await db.media.get(id);
-  if (!asset) return null;
+  if (!asset || generation !== urlGeneration) return null;
+  const filled = urlCache.get(id);
+  if (filled) return filled;
   const url = URL.createObjectURL(asset.blob);
   urlCache.set(id, url);
   return url;
@@ -143,20 +155,28 @@ export function collectMediaIds(item: Item, itemType: ItemType): string[] {
  * item deletion and after an image field is replaced.
  */
 export async function deleteOrphanMedia(ids: string[]): Promise<number> {
-  const candidates = ids.filter(Boolean);
+  let parentTransaction = Dexie.currentTransaction;
+  while (parentTransaction?.parent) parentTransaction = parentTransaction.parent;
+  const candidates = [...new Set(ids.filter(Boolean))];
   if (candidates.length === 0) return 0;
-  const referenced = new Set<string>();
-  const items = await db.items.toArray();
-  for (const item of items) {
-    for (const v of Object.values(item.fieldValues)) {
-      if (typeof v === 'string' && candidates.includes(v)) referenced.add(v);
+  const candidateSet = new Set(candidates);
+  const orphans = await db.transaction('rw', [db.items, db.media], async () => {
+    const referenced = new Set<string>();
+    const items = await db.items.toArray();
+    for (const item of items) {
+      for (const v of Object.values(item.fieldValues)) {
+        if (typeof v === 'string' && candidateSet.has(v)) referenced.add(v);
+      }
     }
-  }
-  const orphans = candidates.filter((id) => !referenced.has(id));
-  if (orphans.length > 0) {
-    await db.media.bulkDelete(orphans);
-    orphans.forEach(forgetUrl);
-  }
+    const orphans = candidates.filter((id) => !referenced.has(id));
+    if (orphans.length > 0) {
+      await db.media.bulkDelete(orphans);
+    }
+    return orphans;
+  });
+  // A nested command can still roll back. Keep displayed URLs until its owner commits.
+  if (parentTransaction) parentTransaction.on('complete', () => orphans.forEach(forgetUrl));
+  else orphans.forEach(forgetUrl);
   return orphans.length;
 }
 

@@ -3,8 +3,10 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath, URL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 export default defineConfig({
+  root: realpathSync(fileURLToPath(new URL('.', import.meta.url))),
   plugins: [
     react(),
     tailwindcss(),
@@ -23,15 +25,15 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        globPatterns: ['**/*.{js,css,html,svg,png,woff2,wasm}'],
       },
     }),
   ],
   resolve: {
-    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+    alias: { '@': realpathSync(fileURLToPath(new URL('./src', import.meta.url))) },
   },
   test: {
     environment: 'node',
-    setupFiles: ['./vitest.setup.ts'],
+    setupFiles: [realpathSync(fileURLToPath(new URL('./vitest.setup.ts', import.meta.url)))],
   },
 });

@@ -4,17 +4,12 @@ import { Badge, Button, Panel } from '@/components/ui';
 import type { ItemType } from '@/engine/types';
 import type { PacketItem } from '@/packages/schema';
 import { applyPacket, validateItemsForCourse } from '@/packages/importPacket';
-import { generateItems, itemsToPacket } from '@/ai/generate';
+import { generateItems, generationTypeProblem, itemsToPacket } from '@/ai/generate';
 import { aiErrorMessage } from '@/ai/client';
 import { useAiReady } from '@/hooks/useAiReady';
 import { maybeRefreshSnapshot } from '@/exchange/exchange';
 import { now } from '@/services/clock';
-
-function itemLabel(item: PacketItem): string {
-  return Object.entries(item.fields)
-    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
-    .join(' · ');
-}
+import { CandidateContent } from './CandidateContent';
 
 export function GenerateItemsPanel({ courseId, types }: { courseId: string; types: ItemType[] }) {
   const aiReady = useAiReady();
@@ -59,12 +54,16 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
   }
 
   const effectiveTypeId = types.some((t) => t.id === typeId) ? typeId : (types[0]?.id ?? '');
+  const type = types.find((t) => t.id === effectiveTypeId);
+  const unsupported = type ? generationTypeProblem(type) : 'Create an item type first.';
 
   return (
     <Panel title="✨ Generate items with AI">
       {!preview && (
         <div className="space-y-3">
           <textarea
+            aria-label="Topic or source text for generated items"
+            disabled={busy}
             value={request}
             onChange={(e) => setRequest(e.target.value)}
             rows={3}
@@ -74,6 +73,8 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
           <div className="flex flex-wrap items-center gap-2">
             {types.length > 1 && (
               <select
+                aria-label="Item type for generated items"
+                disabled={busy}
                 value={effectiveTypeId}
                 onChange={(e) => setTypeId(e.target.value)}
                 className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
@@ -86,6 +87,8 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
               </select>
             )}
             <select
+              aria-label="Number of drafts"
+              disabled={busy}
               value={count}
               onChange={(e) => setCount(+e.target.value)}
               className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
@@ -98,7 +101,9 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
             </select>
             <Button
               variant="primary"
-              disabled={busy || !request.trim() || !effectiveTypeId}
+              disabled={
+                busy || aiReady !== true || !!unsupported || !request.trim() || !effectiveTypeId
+              }
               onClick={() =>
                 void guarded(async () => {
                   setDone('');
@@ -116,17 +121,20 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
             </Button>
             {done && <span className="text-sm text-emerald-300">{done}</span>}
           </div>
+          {unsupported && <p className="text-sm text-amber-300">{unsupported}</p>}
         </div>
       )}
 
       {preview && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <Badge color="violet">
               {selected.size}/{preview.length} selected
             </Badge>
             <div className="flex gap-2">
-              <Button onClick={() => setPreview(null)}>← Discard</Button>
+              <Button disabled={busy} onClick={() => setPreview(null)}>
+                Discard
+              </Button>
               <Button
                 variant="primary"
                 disabled={selected.size === 0 || busy}
@@ -148,11 +156,6 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
           <ul className="max-h-80 space-y-1 overflow-y-auto pr-1">
             {preview.map((item, i) => {
               const rowError = itemErrors[i];
-              const synonymList = Array.isArray(item.synonyms)
-                ? item.synonyms
-                : item.synonyms
-                  ? Object.values(item.synonyms).flat()
-                  : [];
               return (
                 <li
                   key={i}
@@ -161,7 +164,8 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
                   <input
                     type="checkbox"
                     checked={selected.has(i)}
-                    disabled={!!rowError}
+                    disabled={busy || !!rowError}
+                    aria-label={`Select draft ${i + 1}`}
                     onChange={(e) => {
                       const next = new Set(selected);
                       if (e.target.checked) next.add(i);
@@ -171,11 +175,7 @@ export function GenerateItemsPanel({ courseId, types }: { courseId: string; type
                     className="mt-1"
                   />
                   <div className="min-w-0 text-sm">
-                    <div className="text-slate-200">{itemLabel(item)}</div>
-                    {synonymList.length > 0 && (
-                      <div className="text-xs text-slate-500">also: {synonymList.join(', ')}</div>
-                    )}
-                    {item.note && <div className="text-xs text-violet-300/80">💡 {item.note}</div>}
+                    <CandidateContent item={item} type={type} />
                     {rowError && <div className="text-xs text-rose-300">⚠ {rowError}</div>}
                   </div>
                 </li>

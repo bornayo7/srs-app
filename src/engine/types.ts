@@ -2,13 +2,7 @@
 
 // ---------- Fields & templates ----------
 
-export type FieldKind =
-  | 'text'
-  | 'richtext'
-  | 'image'
-  | 'audio'
-  | 'list'
-  | 'clozeSentences'; // P5: [{text with ⟦blank⟧ markers, translation?, hint?}]
+export type FieldKind = 'text' | 'richtext' | 'image' | 'audio' | 'list' | 'clozeSentences'; // P5: [{text with ⟦blank⟧ markers, translation?, hint?}]
 
 export interface ClozeSentence {
   text: string; // e.g. "私はりんご⟦を⟧食べる"
@@ -39,6 +33,9 @@ export interface CardTemplate {
 }
 
 export interface ItemType {
+  generation: string;
+  /** Monotonic content revision; never a wall-clock timestamp. */
+  rev: number;
   id: string;
   courseId: string;
   name: string;
@@ -110,6 +107,9 @@ export interface GuidanceAnswer {
 }
 
 export interface Item {
+  generation: string;
+  /** Monotonic revision of authored content (progress changes do not alter it). */
+  rev: number;
   id: string;
   courseId: string;
   typeId: string;
@@ -151,6 +151,9 @@ export interface CardStats {
 }
 
 export interface Card {
+  generation: string;
+  /** Incremented by every scheduling/lifecycle mutation, including undo. */
+  rev: number;
   id: string;
   itemId: string;
   courseId: string; // denormalized for compound indexes
@@ -189,8 +192,42 @@ export interface ReviewLog {
     | { kind: 'ladder'; incorrectCount: number; fromStage: number; toStage: number }
     | { kind: 'fsrs'; rating: 1 | 2 | 3 | 4; elapsedDays: number; scheduledDays: number };
   prev: CardSnapshot; // full snapshot → O(1) undo, auditability
+  /** Only new versioned operations have undo authority. Legacy logs are history. */
+  appliedRev?: number;
+  appliedGeneration?: string;
+  /** Content identity observed by this operation; guards undo after schema edits. */
+  itemRev?: number;
+  typeRev?: number;
+  itemGeneration?: string;
+  typeGeneration?: string;
   /** Enough card identity to resurrect a deleted ghost card on undo. */
   cardMeta?: { templateId: string; isGhost?: boolean; parentCardId?: string };
+}
+
+/** A graduated ghost's deletion is itself a versioned mutation, not a free ID. */
+export interface CardTombstone {
+  generation: string;
+  id: string;
+  itemId: string;
+  courseId: string;
+  templateId: string;
+  rev: number;
+  logId: string;
+}
+
+export interface PacketReceipt {
+  id: string;
+  digest: string;
+  importedAt: number;
+  courseIds: string[];
+}
+
+/** Daily consumption survives item/history deletion until the course is deleted. */
+export interface DailyLesson {
+  id: string;
+  courseId: string;
+  day: string;
+  itemIds: string[];
 }
 
 // ---------- Misc ----------
@@ -256,6 +293,8 @@ export interface ProposalItem {
   prereqs?: string[];
   fields: Record<string, FieldValue>;
   synonyms?: string[] | Record<string, string[]>;
+  blockList?: Record<string, string[]>;
+  guidance?: Record<string, GuidanceAnswer[]>;
   note?: string;
   level?: number;
 }

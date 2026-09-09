@@ -1,3 +1,4 @@
+import { nextRevision } from '@/engine/revision';
 import Dexie from 'dexie';
 import { db } from '@/db/db';
 import { newId } from '@/engine/ids';
@@ -5,6 +6,7 @@ import { dueForStage } from '@/engine/scheduler/ladder';
 import { studyStatus } from '@/engine/typeDesign';
 import type { Card, CardSnapshot, ReviewLog, SrsLadder } from '@/engine/types';
 import { applyGatingAfterReview, recomputeUnlocks, type GatingOutcome } from './gating';
+import { StudyConflict, undoContentStillMatches } from './studyRevision';
 
 /**
  * Manual SRS control: put a card at any stage, send it back to lessons,
@@ -27,6 +29,7 @@ export interface ManualResult {
 }
 
 const NO_GATING: GatingOutcome = { itemPassed: false, unlockedItemIds: [], leveledUpTo: null };
+const mutationTables = [db.cards, db.items, db.itemTypes, db.courses, db.ladders, db.reviewLogs];
 
 /** Stage choices for a picker: every real stage, plus New and (if enabled) Burned. */
 export function stageOptions(ladder: SrsLadder): { value: number; label: string }[] {
@@ -38,7 +41,7 @@ export function stageOptions(ladder: SrsLadder): { value: number; label: string 
 
 function applyAction(card: Card, action: ManualAction, ladder: SrsLadder, now: number): Card {
   const top = ladder.stages.length;
-  const next: Card = { ...card, updatedAt: now };
+  const next: Card = { ...card, rev: nextRevision(card.rev), updatedAt: now };
   delete next.dueAt; // re-added below only where the state calls for it
 
   switch (action.kind) {
@@ -72,6 +75,7 @@ function applyAction(card: Card, action: ManualAction, ladder: SrsLadder, now: n
     }
 
     case 'setStage': {
+      if (!Number.isInteger(action.stageIndex)) throw new Error('Choose a whole SRS stage.');
       const idx = Math.max(0, Math.min(action.stageIndex, top));
       if (idx >= top) {
         next.state = 'burned';
@@ -105,109 +109,132 @@ async function manualUpdate(
   action: ManualAction,
   now: number,
   opts: { clearPassed?: boolean } = {},
-): Promise<ManualResult & { courseIds: string[] }> {
+): Promise<ManualResult> {
   const sessionId = newId();
-  return db.transaction(
-    'rw',
-    [db.cards, db.items, db.courses, db.ladders, db.reviewLogs],
-    async () => {
-      const cards = (await db.cards.bulkGet(cardIds)).filter((c): c is Card => !!c);
-      if (cards.length === 0) throw new Error('card not found');
+  return db.transaction('rw', mutationTables, async () => {
+    const cards = (await db.cards.bulkGet([...new Set(cardIds)])).filter((c): c is Card => !!c);
+    if (cards.length === 0) throw new Error('card not found');
 
-      const ladders = new Map<string, SrsLadder>();
-      const ladderFor = async (courseId: string): Promise<SrsLadder> => {
-        const cached = ladders.get(courseId);
-        if (cached) return cached;
-        const course = await db.courses.get(courseId);
-        if (!course) throw new Error('course not found');
-        if (course.scheduling.kind !== 'ladder') {
-          throw new Error('manual stage control needs a ladder-scheduled course');
-        }
-        const ladder = await db.ladders.get(course.scheduling.ladderId);
-        if (!ladder) throw new Error('ladder not found');
-        ladders.set(courseId, ladder);
-        return ladder;
-      };
+    const ladders = new Map<string, SrsLadder>();
+    const ladderFor = async (courseId: string): Promise<SrsLadder> => {
+      const cached = ladders.get(courseId);
+      if (cached) return cached;
+      const course = await db.courses.get(courseId);
+      if (!course) throw new Error('course not found');
+      if (course.scheduling.kind !== 'ladder') {
+        throw new Error('manual stage control needs a ladder-scheduled course');
+      }
+      const ladder = await db.ladders.get(course.scheduling.ladderId);
+      if (!ladder) throw new Error('ladder not found');
+      ladders.set(courseId, ladder);
+      return ladder;
+    };
 
-      const logs: ReviewLog[] = [];
-      const itemIds = new Set<string>();
-      for (const card of cards) {
-        const ladder = card.isGhost
-          ? ((await db.ladders.get('preset-ghost')) ?? (await ladderFor(card.courseId)))
-          : await ladderFor(card.courseId);
-        const prev = snapshot(card);
-        const updated = applyAction(card, action, ladder, now);
-        await db.cards.put(updated);
-        itemIds.add(card.itemId);
-        logs.push({
-          id: newId(),
-          cardId: card.id,
-          itemId: card.itemId,
-          courseId: card.courseId,
-          ts: now,
-          sessionId,
-          kind: 'manual',
-          prev,
-          cardMeta: {
-            templateId: card.templateId,
-            ...(card.isGhost ? { isGhost: true, parentCardId: card.parentCardId } : {}),
-          },
+    const logs: ReviewLog[] = [];
+    const itemIds = new Set<string>();
+    for (const card of cards) {
+      if (action.kind === 'resume' && card.state !== 'suspended') continue;
+      const item = await db.items.get(card.itemId);
+      const type = item && (await db.itemTypes.get(item.typeId));
+      if (
+        !item ||
+        !type ||
+        item.courseId !== card.courseId ||
+        type.courseId !== card.courseId ||
+        !type.templates.some((t) => t.id === card.templateId)
+      ) {
+        throw new StudyConflict('This question no longer has matching content.');
+      }
+      if (
+        !card.isGhost &&
+        item.status === 'locked' &&
+        ['setStage', 'burn', 'resume'].includes(action.kind)
+      ) {
+        throw new Error(
+          'This item is locked. Release its level and prerequisites before scheduling it.',
+        );
+      }
+      const ladder = card.isGhost
+        ? ((await db.ladders.get('preset-ghost')) ?? (await ladderFor(card.courseId)))
+        : await ladderFor(card.courseId);
+      const prev = snapshot(card);
+      const updated = applyAction(card, action, ladder, now);
+      await db.cards.put(updated);
+      if (!card.isGhost) itemIds.add(card.itemId);
+      logs.push({
+        id: newId(),
+        cardId: card.id,
+        itemId: card.itemId,
+        courseId: card.courseId,
+        ts: now,
+        sessionId,
+        kind: 'manual',
+        prev,
+        appliedRev: updated.rev,
+        appliedGeneration: card.generation,
+        itemRev: item.rev,
+        typeRev: type.rev,
+        itemGeneration: item.generation,
+        typeGeneration: type.generation,
+        cardMeta: {
+          templateId: card.templateId,
+          ...(card.isGhost ? { isGhost: true, parentCardId: card.parentCardId } : {}),
+        },
+      });
+    }
+    await db.reviewLogs.bulkAdd(logs);
+
+    const courseIds = [...new Set(cards.map((c) => c.courseId))];
+    let gating = NO_GATING;
+    for (const itemId of itemIds) {
+      const item = await db.items.get(itemId);
+      if (!item) continue;
+      // lesson ⇄ active follows what the item's real cards now hold: cards
+      // set to a stage leave nothing to teach, a reset card must be taught
+      // again — otherwise the item would sit in the wrong queue
+      const realCards = (await db.cards.where('itemId').equals(itemId).toArray()).filter(
+        (c) => !c.isGhost,
+      );
+      const status = studyStatus(item.status, realCards);
+      const unpass = opts.clearPassed && item.passedAt !== null;
+      if (status !== item.status || unpass) {
+        await db.items.put({
+          ...item,
+          status,
+          ...(unpass ? { passedAt: null } : {}),
+          updatedAt: now,
         });
       }
-      await db.reviewLogs.bulkAdd(logs);
-
-      const courseIds = [...new Set(cards.map((c) => c.courseId))];
-      let gating = NO_GATING;
-      for (const itemId of itemIds) {
-        const item = await db.items.get(itemId);
-        if (!item) continue;
-        // lesson ⇄ active follows what the item's real cards now hold: cards
-        // set to a stage leave nothing to teach, a reset card must be taught
-        // again — otherwise the item would sit in the wrong queue
-        const realCards = (await db.cards.where('itemId').equals(itemId).toArray()).filter(
-          (c) => !c.isGhost,
-        );
-        const status = studyStatus(item.status, realCards);
-        const unpass = opts.clearPassed && item.passedAt !== null;
-        if (status !== item.status || unpass) {
-          await db.items.put({
-            ...item,
-            status,
-            ...(unpass ? { passedAt: null } : {}),
-            updatedAt: now,
-          });
-        }
-        if (opts.clearPassed) continue; // recomputeUnlocks re-settles the graph after commit
-        const course = await db.courses.get(item.courseId);
-        // promoting a card can complete an item — unlock its dependents now
-        if (course) {
-          const outcome = await applyGatingAfterReview(course, itemId, now);
-          if (outcome.itemPassed) gating = outcome;
-        }
+      if (opts.clearPassed) continue; // settle the graph before this transaction commits
+      const course = await db.courses.get(item.courseId);
+      // promoting a card can complete an item — unlock its dependents now
+      if (course) {
+        const outcome = await applyGatingAfterReview(course, itemId, now);
+        if (outcome.itemPassed) gating = outcome;
       }
+    }
 
-      return { sessionId, cardsChanged: cards.length, gating, courseIds };
-    },
-  );
+    if (opts.clearPassed) {
+      for (const courseId of courseIds) await recomputeUnlocks(courseId, now);
+    }
+    return { sessionId, cardsChanged: logs.length, gating };
+  });
 }
 
-async function run(
-  cardIds: string[],
+async function updateItemCards(
+  itemId: string,
   action: ManualAction,
   now: number,
-  opts: { clearPassed?: boolean } = {},
 ): Promise<ManualResult> {
-  const res = await manualUpdate(cardIds, action, now, opts);
-  if (opts.clearPassed) {
-    // items were un-passed: dependents may need re-locking, levels re-deriving
-    for (const courseId of res.courseIds) await recomputeUnlocks(courseId, now);
-  }
-  return res;
-}
-
-async function realCardIdsForItem(itemId: string): Promise<string[]> {
-  const cards = await db.cards.where('itemId').equals(itemId).toArray();
-  return cards.filter((c) => !c.isGhost).map((c) => c.id); // ghosts are drills, not progress
+  return db.transaction('rw', mutationTables, async () => {
+    const cards = await db.cards.where('itemId').equals(itemId).toArray();
+    return manualUpdate(
+      cards.filter((c) => !c.isGhost).map((c) => c.id),
+      action,
+      now,
+      { clearPassed: action.kind === 'reset' },
+    );
+  });
 }
 
 export async function setCardManual(
@@ -215,7 +242,7 @@ export async function setCardManual(
   action: ManualAction,
   now: number,
 ): Promise<ManualResult> {
-  return run([cardId], action, now, { clearPassed: action.kind === 'reset' });
+  return manualUpdate([cardId], action, now, { clearPassed: action.kind === 'reset' });
 }
 
 /** Put every card of an item at the same stage (WaniKani's "set SRS level"). */
@@ -224,30 +251,27 @@ export async function setItemStage(
   stageIndex: number,
   now: number,
 ): Promise<ManualResult> {
-  return run(await realCardIdsForItem(itemId), { kind: 'setStage', stageIndex }, now);
+  return updateItemCards(itemId, { kind: 'setStage', stageIndex }, now);
 }
 
 /** Send an item back to the lesson queue, wiping its scheduling and its pass. */
 export async function resetItem(itemId: string, now: number): Promise<ManualResult> {
-  return run(await realCardIdsForItem(itemId), { kind: 'reset' }, now, { clearPassed: true });
+  return updateItemCards(itemId, { kind: 'reset' }, now);
 }
 
 export async function suspendItem(itemId: string, now: number): Promise<ManualResult> {
-  return run(await realCardIdsForItem(itemId), { kind: 'suspend' }, now);
+  return updateItemCards(itemId, { kind: 'suspend' }, now);
 }
 
 export async function resumeItem(itemId: string, now: number): Promise<ManualResult> {
-  return run(await realCardIdsForItem(itemId), { kind: 'resume' }, now);
+  return updateItemCards(itemId, { kind: 'resume' }, now);
 }
 
 /** The most recent manual operation on an item, for the undo button. */
 export async function lastManualBatch(
   itemId: string,
 ): Promise<{ sessionId: string; ts: number; cards: number } | null> {
-  // reviewLogs is indexed by cardId, not itemId — go through the item's cards
-  const cardIds = await db.cards.where('itemId').equals(itemId).primaryKeys();
-  if (cardIds.length === 0) return null;
-  const logs = await db.reviewLogs.where('cardId').anyOf(cardIds).toArray();
+  const logs = await db.reviewLogs.where('itemId').equals(itemId).toArray();
   const manual = logs.filter((l) => l.kind === 'manual');
   if (manual.length === 0) return null;
   const latest = manual.reduce((a, b) => (b.ts >= a.ts ? b : a));
@@ -262,9 +286,9 @@ export async function lastManualBatch(
  * that un-passed an item is fully reversed.
  */
 export async function undoManualBatch(sessionId: string, now: number): Promise<number> {
-  const { restored, courseIds } = await db.transaction(
+  return db.transaction(
     'rw',
-    [db.cards, db.reviewLogs],
+    [db.cards, db.items, db.itemTypes, db.courses, db.ladders, db.reviewLogs],
     async () => {
       const logs = (
         await db.reviewLogs
@@ -272,12 +296,29 @@ export async function undoManualBatch(sessionId: string, now: number): Promise<n
           .between([sessionId, Dexie.minKey], [sessionId, Dexie.maxKey])
           .toArray()
       ).filter((l) => l.kind === 'manual');
+      // Validate the entire group before restoring any member. One stale card
+      // means this operation can no longer be reversed as an atomic action.
+      for (const log of logs) {
+        const card = await db.cards.get(log.cardId);
+        if (
+          !card ||
+          card.rev !== log.appliedRev ||
+          card.generation !== log.appliedGeneration ||
+          card.itemId !== log.itemId ||
+          card.courseId !== log.courseId ||
+          card.templateId !== log.cardMeta?.templateId ||
+          !(await db.courses.get(log.courseId)) ||
+          !(await undoContentStillMatches(log))
+        )
+          return 0;
+      }
       let restored = 0;
       for (const log of logs) {
         const card = await db.cards.get(log.cardId);
         if (!card) continue;
         const next: Card = {
           ...card,
+          rev: nextRevision(card.rev),
           state: log.prev.state,
           srs: log.prev.srs,
           stats: { ...log.prev.stats },
@@ -289,9 +330,9 @@ export async function undoManualBatch(sessionId: string, now: number): Promise<n
         restored++;
       }
       await db.reviewLogs.bulkDelete(logs.map((l) => l.id));
-      return { restored, courseIds: [...new Set(logs.map((l) => l.courseId))] };
+      for (const courseId of new Set(logs.map((l) => l.courseId)))
+        await recomputeUnlocks(courseId, now);
+      return restored;
     },
   );
-  for (const courseId of courseIds) await recomputeUnlocks(courseId, now);
-  return restored;
 }

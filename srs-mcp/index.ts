@@ -12,167 +12,47 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { packetSchema, PACKET_FORMAT, PACKET_VERSION } from '../src/packages/schema';
+import {
+  packetItemSchema,
+  packetItemTypeSchema,
+  packetUnitSchema,
+  PACKET_FORMAT,
+  PACKET_VERSION,
+} from '../src/packages/schema';
+import {
+  readSnapshot as readExchangeSnapshot,
+  writePacket as publishPacket,
+  findCourse,
+} from './exchangeFiles';
 
 const EXCHANGE_DIR = process.env.SRS_EXCHANGE ?? path.join(os.homedir(), 'srs-exchange');
-const INBOX_DIR = path.join(EXCHANGE_DIR, 'inbox');
-
-const CONNECT_HELP = `No snapshot.json found in ${EXCHANGE_DIR}. In the SRS app, open Inbox → "Connect exchange folder" and pick exactly this folder (create it first if needed). The app then writes snapshot.json and imports packets from inbox/. To use a different folder, set the SRS_EXCHANGE environment variable for this MCP server.`;
-
-interface SnapshotCourse {
-  id: string;
-  name: string;
-  description: string;
-  itemTypes: {
-    name: string;
-    fields: { name: string; kind: string }[];
-    templates: { name: string; promptFields: string[]; answerField: string }[];
-  }[];
-  counts: Record<string, number>;
-  items: { preview: string; type: string; fields: Record<string, string>; lapses: number; note?: string }[];
-  struggling: { preview: string; fields: Record<string, string>; lapses: number; note?: string }[];
-  ladder: { name: string } | null;
-  currentLevel?: number;
-  /** Planned (progressive) courses: units map 1:1 onto levels. */
-  plan?: {
-    releaseMode: 'progress' | 'schedule' | 'manual';
-    units: { level: number; title: string; released: boolean; releaseAt: string | null; pendingProposals: number }[];
-  } | null;
-}
-
-async function readSnapshot(): Promise<{ generatedAt: number; courses: SnapshotCourse[] }> {
-  const raw = await fs.readFile(path.join(EXCHANGE_DIR, 'snapshot.json'), 'utf8').catch(() => {
-    throw new Error(CONNECT_HELP);
-  });
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(
-      'snapshot.json exists but is not valid JSON — reopen the SRS app Inbox page to rewrite it.',
-    );
-  }
-  const snap = parsed as { generatedAt?: unknown; courses?: unknown };
-  if (typeof snap.generatedAt !== 'number' || !Array.isArray(snap.courses)) {
-    throw new Error(
-      'snapshot.json has an unexpected shape (older app version?) — reopen the SRS app Inbox page to rewrite it.',
-    );
-  }
-  return parsed as { generatedAt: number; courses: SnapshotCourse[] };
-}
+const readSnapshot = () => readExchangeSnapshot(EXCHANGE_DIR);
+const writePacket = (slug: string, packet: unknown) => publishPacket(EXCHANGE_DIR, slug, packet);
 
 function snapshotAge(snap: { generatedAt: number }): string {
   const mins = Math.round((Date.now() - snap.generatedAt) / 60_000);
   return `snapshot is ${mins} min old — it refreshes whenever the app's Inbox page is open`;
 }
 
-function findCourse(snap: { courses: SnapshotCourse[] }, ref: string): SnapshotCourse {
-  const course =
-    snap.courses.find((c) => c.id === ref) ??
-    snap.courses.find((c) => c.name.toLowerCase() === ref.toLowerCase());
-  if (!course) {
-    throw new Error(
-      `Course "${ref}" not found. Available: ${snap.courses.map((c) => `${c.name} (${c.id})`).join(', ') || 'none'}`,
-    );
-  }
-  return course;
-}
-
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 function fail(err: unknown) {
-  return { content: [{ type: 'text' as const, text: (err as Error).message }], isError: true };
+  return {
+    content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+    isError: true,
+  };
 }
 
-async function writePacket(slugBase: string, packet: unknown): Promise<string> {
-  const parsed = packetSchema.safeParse(packet);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .slice(0, 5)
-      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
-      .join('; ');
-    throw new Error(`Packet failed validation — fix the input and retry: ${issues}`);
-  }
-  await fs.mkdir(path.join(INBOX_DIR, 'done'), { recursive: true });
-  const slug = slugBase.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || 'packet';
-  const fileName = `${Date.now()}-${slug}.json`;
-  await fs.writeFile(path.join(INBOX_DIR, fileName), JSON.stringify(packet, null, 2), 'utf8');
-  return fileName;
-}
-
-const itemInput = z.object({
-  fields: z
-    .record(z.string(), z.string())
-    .describe('Field NAME → value, using the exact field names of the item type'),
-  key: z
-    .string()
-    .optional()
-    .describe('Local handle so LATER items in this list can name this one as a prerequisite'),
-  prereqs: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'Keys of items defined EARLIER in this list (or existing item ids). The item stays locked until all of them are learned to the pass stage — use for radical→kanji→vocab style chains.',
-    ),
-  level: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe('Level number when the course uses levels (default 1)'),
-  synonyms: z
-    .union([z.array(z.string()), z.record(z.string(), z.array(z.string()))])
-    .optional()
-    .describe(
-      'Alternate accepted answers. Plain array ONLY for single-template types; for multi-template types use {"templateName": ["synonym", ...]} so a meaning synonym never counts as a reading answer.',
-    ),
-  note: z.string().optional().describe('A short mnemonic shown during lessons and after misses'),
+const itemInput = packetItemSchema;
+const itemTypeInput = packetItemTypeSchema.extend({
+  fields: z.array(z.union([z.string().min(1), packetItemTypeSchema.shape.fields.element])).min(1),
 });
-
-const templateInput = z.object({
-  name: z.string(),
-  promptFields: z.array(z.string()).min(1),
-  answerField: z.string(),
-  mode: z
-    .enum(['typed', 'choice'])
-    .optional()
-    .describe(
-      'typed (default) = the user types the answer (keep it 1-4 words); choice = multiple choice, wrong options drawn automatically from other items of this type (so write at least ~6 per type)',
-    ),
-  choices: z.number().int().min(2).max(6).optional().describe('Options shown in choice mode (default 4)'),
-  answerLang: z.enum(['latin', 'kana']).optional().describe('kana = answer typed in Japanese kana, exact match'),
-});
-
-const itemTypeInput = z.object({
-  name: z.string().describe('Singular noun, e.g. "Term", "Question", "Formula"'),
-  icon: z.string().optional().describe('One emoji'),
-  fields: z.array(z.string()).min(1).describe('Field names, 2-4'),
-  templates: z.array(templateInput).min(1),
-});
-
-const unitInput = z.object({
-  title: z.string().describe('Short unit title, e.g. "Week 3 — Cell division"'),
-  summary: z.string().optional().describe('One sentence'),
-  topics: z.array(z.string()).optional().describe('3-8 specific things worth remembering from this unit'),
-  targetCount: z
-    .number()
-    .int()
-    .min(0)
-    .optional()
-    .describe('How many items this unit deserves (the app uses it when drafting more later)'),
-  releaseAt: z
-    .string()
-    .optional()
-    .describe('ISO date (YYYY-MM-DD) the unit opens — used by the "schedule" release mode'),
-  items: z
-    .array(itemInput)
-    .optional()
-    .describe('Proposed items for this unit. They go to the app’s REVIEW QUEUE, not straight into the course.'),
-});
+const unitInput = packetUnitSchema;
+const toFields = (fields: z.infer<typeof itemTypeInput>['fields']) =>
+  fields.map((field) => (typeof field === 'string' ? { name: field } : field));
 
 const server = new McpServer({ name: 'srs', version: '0.2.0' });
 
@@ -195,7 +75,10 @@ server.tool(
           .join(' | ');
         const plan = c.plan
           ? `\n  PLAN (${c.plan.releaseMode} release): ${c.plan.units
-              .map((u) => `unit ${u.level} "${u.title}"${u.released ? ' [open]' : u.releaseAt ? ` [opens ${u.releaseAt}]` : ' [locked]'}${u.pendingProposals ? ` (${u.pendingProposals} awaiting review)` : ''}`)
+              .map(
+                (u) =>
+                  `unit ${u.level} "${u.title}"${u.released ? ' [open]' : u.releaseAt ? ` [opens ${u.releaseAt}]` : ' [locked]'}${u.pendingProposals ? ` (${u.pendingProposals} awaiting review)` : ''}`,
+              )
               .join(', ')} — propose items with propose_items(unit=N)`
           : '';
         return `• ${c.name} (id ${c.id})\n  ${c.description || 'no description'}\n  items: ${c.counts.items}, lesson queue: ${c.counts.lessonQueue}, due now: ${c.counts.dueNow}, ladder: ${c.ladder?.name ?? 'FSRS'}\n  ${types}${plan}`;
@@ -253,7 +136,9 @@ server.tool(
     ladderPreset: z
       .enum(['classic', 'gentle', 'bunpro'])
       .optional()
-      .describe('SRS ladder: classic (WaniKani 4h→4mo, burns), gentle (daily-life, never burns), bunpro (gradual 11 stages). Default classic.'),
+      .describe(
+        'SRS ladder: classic (WaniKani 4h→4mo, burns), gentle (daily-life, never burns), bunpro (gradual 11 stages). Default classic.',
+      ),
     levelMode: z
       .enum(['flat', 'levels'])
       .optional()
@@ -269,40 +154,19 @@ server.tool(
       .max(100)
       .optional()
       .describe('Percent of a level’s gate items that must pass to advance (default 90).'),
-    itemType: z.object({
-      name: z.string().describe('Singular noun, e.g. "Word", "Fact"'),
-      icon: z.string().optional().describe('One emoji'),
-      fields: z.array(z.string()).min(1).describe('Field names, 2-4'),
-      templates: z
-        .array(
-          z.object({
-            name: z.string(),
-            promptFields: z.array(z.string()).min(1),
-            answerField: z.string(),
-            mode: z
-              .enum(['typed', 'choice'])
-              .optional()
-              .describe(
-                'typed (default) = the user types the answer; choice = multiple choice, with wrong options taken automatically from the other items of this type (so write at least ~6 items)',
-              ),
-            choices: z
-              .number()
-              .int()
-              .min(2)
-              .max(6)
-              .optional()
-              .describe('Options shown in choice mode (default 4)'),
-            answerLang: z
-              .enum(['latin', 'kana'])
-              .optional()
-              .describe('kana = answer typed in Japanese kana, exact match'),
-          }),
-        )
-        .min(1),
-    }),
+    itemType: itemTypeInput,
     items: z.array(itemInput).min(1),
   },
-  async ({ name, description, ladderPreset, levelMode, gateTypes, passPercent, itemType, items }) => {
+  async ({
+    name,
+    description,
+    ladderPreset,
+    levelMode,
+    gateTypes,
+    passPercent,
+    itemType,
+    items,
+  }) => {
     try {
       // proves the user has actually connected the exchange folder — otherwise
       // the packet would land somewhere the app never reads
@@ -316,15 +180,8 @@ server.tool(
           {
             name: itemType.name,
             icon: itemType.icon,
-            fields: itemType.fields.map((f) => ({ name: f })),
-            templates: itemType.templates.map((t) => ({
-              name: t.name,
-              promptFields: t.promptFields,
-              answerField: t.answerField,
-              mode: t.mode,
-              choices: t.choices,
-              answerLang: t.answerLang,
-            })),
+            fields: toFields(itemType.fields),
+            templates: itemType.templates,
           },
         ],
         items,
@@ -348,7 +205,9 @@ server.tool(
     ladderPreset: z
       .enum(['classic', 'gentle', 'bunpro'])
       .optional()
-      .describe('SRS ladder: classic (WaniKani 4h→4mo, burns), gentle (never burns), bunpro (gradual). Default classic.'),
+      .describe(
+        'SRS ladder: classic (WaniKani 4h→4mo, burns), gentle (never burns), bunpro (gradual). Default classic.',
+      ),
     releaseMode: z
       .enum(['progress', 'schedule', 'manual'])
       .optional()
@@ -361,16 +220,40 @@ server.tool(
       .min(1)
       .max(100)
       .optional()
-      .describe('progress mode: percent of a unit’s items that must pass to open the next (default 90)'),
-    newPerDay: z.number().int().min(0).optional().describe('Daily new-lesson cap — the within-unit drip (default 15)'),
+      .describe(
+        'progress mode: percent of a unit’s items that must pass to open the next (default 90)',
+      ),
+    newPerDay: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Daily new-lesson cap — the within-unit drip (default 15)'),
     itemTypes: z.array(itemTypeInput).min(1).max(3),
-    units: z.array(unitInput).min(1).describe('In course order. Author items in dependency order across units — a prereq key must be defined earlier.'),
+    units: z
+      .array(unitInput)
+      .min(1)
+      .describe(
+        'In course order. Author items in dependency order across units — a prereq key must be defined earlier.',
+      ),
     material: z
       .string()
       .optional()
-      .describe('The source material in full (syllabus / notes). Saved with the plan so later units can be drafted from it; never shown as a card.'),
+      .describe(
+        'The source material in full (syllabus / notes). Saved with the plan so later units can be drafted from it; never shown as a card.',
+      ),
   },
-  async ({ name, description, ladderPreset, releaseMode, passPercent, newPerDay, itemTypes, units, material }) => {
+  async ({
+    name,
+    description,
+    ladderPreset,
+    releaseMode,
+    passPercent,
+    newPerDay,
+    itemTypes,
+    units,
+    material,
+  }) => {
     try {
       await readSnapshot(); // proves the exchange folder is connected
       const packet = {
@@ -381,7 +264,7 @@ server.tool(
         itemTypes: itemTypes.map((t) => ({
           name: t.name,
           icon: t.icon,
-          fields: t.fields.map((f) => ({ name: f })),
+          fields: toFields(t.fields),
           templates: t.templates,
         })),
         units,
@@ -403,13 +286,18 @@ server.tool(
   'Propose items for an EXISTING course’s REVIEW QUEUE — the user accepts or rejects each one before it enters their reviews. Prefer this over add_items for anything drafted from course material. For planned courses, pass unit=N so the items enter that unit (level) and stay locked until it opens. Call get_course first for exact field names, existing items (avoid duplicates; their ids can be prerequisites), and the unit list.',
   {
     course: z.string().describe('Course id (preferred) or exact course name'),
-    type: z.string().optional().describe('Item type name — required only when the course has multiple types'),
+    type: z
+      .string()
+      .optional()
+      .describe('Item type name — required only when the course has multiple types'),
     unit: z
       .number()
       .int()
       .min(1)
       .optional()
-      .describe('Target unit (= level) for items that don’t set their own level; default: the course’s current level'),
+      .describe(
+        'Target unit (= level) for items that don’t set their own level; default: the course’s current level',
+      ),
     items: z.array(itemInput).min(1),
   },
   async ({ course: ref, type, unit, items }) => {

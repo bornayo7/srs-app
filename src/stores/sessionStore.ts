@@ -1,75 +1,19 @@
 import { create } from 'zustand';
-import type { Card, CardTemplate, Item, ItemType } from '@/engine/types';
-import { matchTypedAnswer, type MatchContext, type MatchVerdict } from '@/engine/grading/match';
-import { buildMatchContext } from '@/engine/grading/context';
-import { isKanaTypeable } from '@/engine/grading/normalize';
-import { pickClozeSentence, type ClozePick } from '@/engine/grading/cloze';
-import type { ChoiceOption } from '@/engine/grading/choice';
-import { buildEntryChoices, newChoiceCache, type ChoiceCache } from '@/services/choices';
+import {
+  entryMatchContext,
+  gradeQuestion,
+  type Feedback,
+  type QuestionProblem,
+  type SessionEntry,
+} from '@/engine/question';
+import { prepareQuestions } from '@/services/questions';
+import { studyRevision, StudyConflict } from '@/services/studyRevision';
 import { mulberry32, orderEntries, reinsertIndex } from '@/engine/queue';
 import { newId } from '@/engine/ids';
-import { db } from '@/db/db';
 import { dueCards } from '@/db/repo/cards';
 import { commitReview } from '@/services/commitReview';
 import { undoReview } from '@/services/undo';
 import { now } from '@/services/clock';
-
-export interface SessionEntry {
-  card: Card; // snapshot at session load
-  item: Item;
-  itemType: ItemType;
-  template: CardTemplate;
-  /** Present for sentence-cloze templates: the sentence chosen for this session. */
-  cloze?: ClozePick;
-  /** Present for multiple-choice templates that found enough distractors. */
-  choices?: ChoiceOption[];
-}
-
-/** Grading context for any entry, cloze-aware. Exported for the cram page. */
-export function entryMatchContext(entry: SessionEntry): MatchContext {
-  if (entry.cloze) {
-    return {
-      accepted: [entry.cloze.blank, ...(entry.item.synonyms[entry.template.id] ?? [])],
-      blocked: entry.item.blockList[entry.template.id] ?? [],
-      guidance: entry.item.guidance[entry.template.id] ?? [],
-      siblingAccepted: [],
-      // kana-only blanks get the romaji IME; a blank containing kanji must not
-      // (romaji can't produce kanji, and the IME would mangle the attempt)
-      answerLang: isKanaTypeable(entry.cloze.blank) ? 'kana' : 'latin',
-      typoTolerance: true,
-    };
-  }
-  return buildMatchContext(entry.item, entry.itemType, entry.template);
-}
-
-/** Which script the answer box should type in — drives the kana IME. */
-export function entryAnswerLang(entry: SessionEntry): 'latin' | 'kana' {
-  return entryMatchContext(entry).answerLang;
-}
-
-/** Attach a cloze pick when the template is sentence-cloze. Exported for reuse. */
-export function withClozePick<T extends Omit<SessionEntry, 'cloze'>>(
-  entry: T,
-  seed: number,
-): T & { cloze?: ClozePick } {
-  const cloze = pickClozeSentence(entry.item, entry.template, seed, entry.card.stats.reviews);
-  return cloze ? { ...entry, cloze } : entry;
-}
-
-/**
- * Attach multiple-choice options when the template asks for them. Hits the DB
- * for sibling answers, so pass a cache when building a whole queue. Templates
- * without enough distractors come back unchanged and fall back to typing.
- */
-export async function withChoices<T extends SessionEntry>(
-  entry: T,
-  seed: number,
-  cache?: ChoiceCache,
-): Promise<T> {
-  const choices = await buildEntryChoices(entry, seed, cache);
-  return choices ? { ...entry, choices } : entry;
-}
-
 export interface CompletedReview {
   entry: SessionEntry;
   incorrectCount: number;
@@ -83,13 +27,10 @@ export interface CompletedReview {
   leveledUpTo: number | null;
 }
 
-export type Feedback =
-  | { kind: 'correct'; typo: boolean; toStage: number | null; burned: boolean }
-  | { kind: 'incorrect'; accepted: string[] }
-  | { kind: 'retry'; reason: string; message?: string; nonce: number };
-
 interface SessionState {
-  phase: 'idle' | 'loading' | 'active' | 'summary' | 'empty';
+  phase: 'idle' | 'loading' | 'active' | 'summary' | 'empty' | 'error';
+  problems: QuestionProblem[];
+  notice: string | null;
   courseId: string | null;
   sessionId: string;
   queue: SessionEntry[];
@@ -122,6 +63,8 @@ let loadGeneration = 0;
 
 export const useSession = create<SessionState>((set, get) => ({
   phase: 'idle',
+  problems: [],
+  notice: null,
   courseId: null,
   sessionId: '',
   queue: [],
@@ -136,75 +79,76 @@ export const useSession = create<SessionState>((set, get) => ({
   async start(courseId) {
     const generation = ++loadGeneration;
     const stale = () => generation !== loadGeneration;
-    set({ phase: 'loading', courseId });
-    const cards = await dueCards(courseId, now());
-    if (stale()) return;
-    if (cards.length === 0) {
-      set({ phase: 'empty', queue: [], totalCards: 0, completed: [] });
-      return;
-    }
-    const items = new Map(
-      (await db.items.bulkGet([...new Set(cards.map((c) => c.itemId))]))
-        .filter((i): i is Item => !!i)
-        .map((i) => [i.id, i]),
-    );
-    const types = new Map(
-      (await db.itemTypes.bulkGet([...new Set([...items.values()].map((i) => i.typeId))]))
-        .filter((t): t is ItemType => !!t)
-        .map((t) => [t.id, t]),
-    );
-    if (stale()) return;
-
-    const sessionSeed = now() & 0x7fffffff;
-    const cache = newChoiceCache();
-    const entries: SessionEntry[] = [];
-    for (const [i, card] of cards.entries()) {
-      const item = items.get(card.itemId);
-      const itemType = item && types.get(item.typeId);
-      const template = itemType?.templates.find((t) => t.id === card.templateId);
-      if (item && itemType && template) {
-        entries.push(
-          await withChoices(
-            withClozePick({ card, item, itemType, template }, sessionSeed + i),
-            sessionSeed + i,
-            cache,
-          ),
-        );
-      }
-    }
-
-    if (stale()) return;
-
-    const sortable = entries.map((e) => ({
-      ...e,
-      itemId: e.item.id,
-      typeId: e.itemType.id,
-      level: e.item.level,
-    }));
-    const ordered = orderEntries(sortable, 'shuffle', now() & 0x7fffffff);
-
     set({
-      phase: 'active',
+      phase: 'loading',
+      courseId,
       sessionId: newId(),
-      queue: ordered,
-      totalCards: entries.length,
+      queue: [],
       completed: [],
-      incorrectCounts: {},
+      totalCards: 0,
+      busy: false,
       feedback: null,
       lastCommit: null,
+      incorrectCounts: {},
       wrapUp: false,
+      problems: [],
+      notice: null,
     });
+    try {
+      const cards = await dueCards(courseId, now());
+      if (stale()) return;
+      if (cards.length === 0) {
+        set({ phase: 'empty', queue: [], totalCards: 0, completed: [] });
+        return;
+      }
+      const sessionSeed = now() & 0x7fffffff;
+      const { entries, problems } = await prepareQuestions(cards, sessionSeed);
+
+      if (stale()) return;
+
+      const sortable = entries.map((e) => ({
+        ...e,
+        itemId: e.item.id,
+        typeId: e.itemType.id,
+        level: e.item.level,
+      }));
+      const ordered = orderEntries(sortable, 'shuffle', now() & 0x7fffffff);
+
+      set({
+        phase: ordered.length ? 'active' : 'empty',
+        problems,
+        queue: ordered,
+        totalCards: entries.length,
+        completed: [],
+        incorrectCounts: {},
+        feedback: null,
+        lastCommit: null,
+        wrapUp: false,
+      });
+    } catch (err) {
+      if (!stale())
+        set({
+          phase: 'error',
+          notice: err instanceof Error ? err.message : 'Could not load this session.',
+        });
+    }
   },
 
   async submit(input) {
     const s = get();
     const entry = s.queue[0];
-    if (!entry || s.busy || s.feedback?.kind === 'correct' || s.feedback?.kind === 'incorrect') {
+    if (
+      s.phase !== 'active' ||
+      !entry ||
+      s.busy ||
+      s.feedback?.kind === 'correct' ||
+      s.feedback?.kind === 'incorrect'
+    ) {
       return;
     }
 
     const ctx = entryMatchContext(entry);
-    const verdict: MatchVerdict = matchTypedAnswer(input, ctx);
+    const verdict = gradeQuestion(entry, input);
 
     if (verdict.verdict === 'retry') {
       set({
@@ -243,15 +187,30 @@ export const useSession = create<SessionState>((set, get) => ({
           sessionId: s.sessionId,
           outcome: { kind: 'ladder', incorrectCount },
           now: now(),
+          expected: studyRevision(entry.card, entry.item, entry.itemType),
         });
       } catch (err) {
         // surface commit failures as a retryable notice instead of a silent hang
         if (get().sessionId === s.sessionId) {
+          if (err instanceof StudyConflict) {
+            const rest = get().queue.slice(1);
+            set({
+              queue: rest,
+              feedback: null,
+              totalCards: Math.max(0, get().totalCards - 1),
+              phase: rest.length ? 'active' : get().completed.length ? 'summary' : 'empty',
+              problems: [
+                ...get().problems,
+                { cardId: entry.card.id, itemId: entry.item.id, message: err.message },
+              ],
+            });
+            return;
+          }
           set({
             feedback: {
               kind: 'retry',
               reason: 'empty',
-              message: `Couldn't save the answer (${(err as Error).message.slice(0, 80)}) — press Enter to retry.`,
+              message: `Couldn't save the answer (${(err as Error).message.slice(0, 80)}) — submit the answer again to retry.`,
               nonce: Date.now(),
             },
           });
@@ -288,7 +247,7 @@ export const useSession = create<SessionState>((set, get) => ({
 
   continueNext() {
     const s = get();
-    if (!s.feedback) return;
+    if (s.busy || !s.feedback) return;
     if (s.feedback.kind === 'retry') {
       set({ feedback: null });
       return;
@@ -326,17 +285,30 @@ export const useSession = create<SessionState>((set, get) => ({
       const restored = await undoReview(s.lastCommit.logId);
       const after = get();
       if (after.sessionId !== s.sessionId) return;
-      if (!restored) return;
+      if (!restored) {
+        set({
+          lastCommit: null,
+          notice:
+            'That change is no longer current and cannot be undone. Your newer progress was kept.',
+        });
+        return;
+      }
       const { entry, incorrectCount } = s.lastCommit;
       const stillQueued = after.feedback?.kind === 'correct'; // haven't advanced yet
+      const restoredEntry = { ...entry, card: restored };
       set({
-        queue: stillQueued ? after.queue : [entry, ...after.queue],
+        queue: stillQueued
+          ? [restoredEntry, ...after.queue.slice(1)]
+          : [restoredEntry, ...after.queue],
         completed: after.completed.filter((c) => c.logId !== s.lastCommit!.logId),
         incorrectCounts: { ...after.incorrectCounts, [entry.card.id]: incorrectCount },
         feedback: null,
         lastCommit: null,
         phase: 'active',
       });
+    } catch (err) {
+      if (get().sessionId === s.sessionId)
+        set({ notice: err instanceof Error ? err.message : 'Could not undo. Try again.' });
     } finally {
       if (get().sessionId === s.sessionId) set({ busy: false });
     }
@@ -344,20 +316,26 @@ export const useSession = create<SessionState>((set, get) => ({
 
   enterWrapUp() {
     const s = get();
-    if (s.phase !== 'active') return;
+    if (s.phase !== 'active' || s.busy) return;
     const kept: SessionEntry[] = [];
     for (const e of s.queue) {
       const inProgress = (s.incorrectCounts[e.card.id] ?? 0) > 0;
       if (inProgress || kept.length < 10) kept.push(e);
     }
     // shrink the denominator so the progress bar reflects the truncated session
-    set({ queue: kept, wrapUp: true, totalCards: s.completed.length + kept.length });
+    set({
+      queue: kept,
+      wrapUp: true,
+      totalCards: s.completed.length + kept.length - (s.feedback?.kind === 'correct' ? 1 : 0),
+    });
   },
 
   reset() {
     loadGeneration++; // an in-flight start() must not resurrect the session
     set({
       phase: 'idle',
+      problems: [],
+      notice: null,
       courseId: null,
       sessionId: '',
       queue: [],

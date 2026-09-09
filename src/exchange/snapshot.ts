@@ -4,6 +4,8 @@ import { startOfLocalDay } from '@/engine/time';
 import { itemPreview } from '@/engine/grading/context';
 import { clozeSummary, isClozeSentences } from '@/engine/grading/cloze';
 import type { Card, Item, ItemType } from '@/engine/types';
+import type { Snapshot, SnapshotItem } from './snapshotSchema';
+export type { SnapshotItem } from './snapshotSchema';
 
 /**
  * snapshot.json — what the app publishes into the exchange folder so MCP
@@ -13,164 +15,174 @@ import type { Card, Item, ItemType } from '@/engine/types';
 
 const MAX_ITEMS_PER_COURSE = 1000;
 
-export interface SnapshotItem {
-  id: string;
-  type: string;
-  /** Course level — the unit, for planned courses. */
-  level: number;
-  preview: string;
-  fields: Record<string, string>;
-  status: string;
-  stageIndex: number | null;
-  reviews: number;
-  lapses: number;
-  note?: string;
-}
+export async function buildSnapshot(now: number): Promise<Snapshot> {
+  return db.transaction(
+    'r',
+    [db.courses, db.itemTypes, db.items, db.cards, db.ladders, db.plans, db.proposals],
+    async () => {
+      const courses = await db.courses.toArray();
+      const out = [];
 
-export async function buildSnapshot(now: number): Promise<Record<string, unknown>> {
-  const courses = await db.courses.toArray();
-  const out = [];
+      for (const course of courses) {
+        const types = await db.itemTypes.where('courseId').equals(course.id).toArray();
+        const typeById = new Map<string, ItemType>(types.map((t) => [t.id, t]));
+        const items = await db.items.where('courseId').equals(course.id).toArray();
+        // ALL cards (burned/suspended history counts too, not just scheduled ones)
+        const allCards = await db.cards
+          .where('[courseId+state]')
+          .between([course.id, Dexie.minKey], [course.id, Dexie.maxKey])
+          .toArray();
+        // ghosts are drill copies — exclude them from item stats and counts
+        const realCards = allCards.filter((c) => !c.isGhost);
+        const reviewCards = realCards.filter((c) => c.state === 'review');
+        const burned = realCards.filter((c) => c.state === 'burned').length;
+        const cardsByItem = new Map<string, Card[]>();
+        for (const c of realCards) {
+          const arr = cardsByItem.get(c.itemId) ?? [];
+          arr.push(c);
+          cardsByItem.set(c.itemId, arr);
+        }
 
-  for (const course of courses) {
-    const types = await db.itemTypes.where('courseId').equals(course.id).toArray();
-    const typeById = new Map<string, ItemType>(types.map((t) => [t.id, t]));
-    const items = await db.items.where('courseId').equals(course.id).toArray();
-    // ALL cards (burned/suspended history counts too, not just scheduled ones)
-    const allCards = await db.cards
-      .where('[courseId+state]')
-      .between([course.id, Dexie.minKey], [course.id, Dexie.maxKey])
-      .toArray();
-    // ghosts are drill copies — exclude them from item stats and counts
-    const realCards = allCards.filter((c) => !c.isGhost);
-    const reviewCards = realCards.filter((c) => c.state === 'review');
-    const burned = realCards.filter((c) => c.state === 'burned').length;
-    const cardsByItem = new Map<string, Card[]>();
-    for (const c of realCards) {
-      const arr = cardsByItem.get(c.itemId) ?? [];
-      arr.push(c);
-      cardsByItem.set(c.itemId, arr);
-    }
+        const ladder =
+          course.scheduling.kind === 'ladder'
+            ? await db.ladders.get(course.scheduling.ladderId)
+            : null;
 
-    const ladder =
-      course.scheduling.kind === 'ladder' ? await db.ladders.get(course.scheduling.ladderId) : null;
+        // a planned course: units (= levels), what's open, and what awaits review —
+        // so an assistant can propose items into the right unit
+        const plan = await db.plans.where('courseId').equals(course.id).first();
+        const pendingByLevel = new Map<number, number>();
+        let pendingProposals = 0;
+        for (const p of await db.proposals
+          .where('[courseId+status]')
+          .equals([course.id, 'pending'])
+          .toArray()) {
+          pendingByLevel.set(p.level, (pendingByLevel.get(p.level) ?? 0) + 1);
+          pendingProposals++;
+        }
 
-    // a planned course: units (= levels), what's open, and what awaits review —
-    // so an assistant can propose items into the right unit
-    const plan = await db.plans.where('courseId').equals(course.id).first();
-    const pendingByLevel = new Map<number, number>();
-    let pendingProposals = 0;
-    for (const p of await db.proposals.where('[courseId+status]').equals([course.id, 'pending']).toArray()) {
-      pendingByLevel.set(p.level, (pendingByLevel.get(p.level) ?? 0) + 1);
-      pendingProposals++;
-    }
-
-    const toSnapshotItem = (item: Item): SnapshotItem | null => {
-      const itemType = typeById.get(item.typeId);
-      if (!itemType) return null;
-      const fields: Record<string, string> = {};
-      for (const f of itemType.fields) {
-        const v = item.fieldValues[f.id];
-        const text = isClozeSentences(v)
-          ? clozeSummary(v)
-          : typeof v === 'string'
-            ? v
-            : Array.isArray(v)
-              ? (v as string[]).join(', ')
-              : '';
-        if (text) fields[f.name] = text.slice(0, 200);
-      }
-      const itemCards = cardsByItem.get(item.id) ?? [];
-      const stageIndex = itemCards.reduce<number | null>((min, c) => {
-        if (c.state !== 'review' || c.srs?.kind !== 'ladder') return min;
-        return min === null ? c.srs.stageIndex : Math.min(min, c.srs.stageIndex);
-      }, null);
-      return {
-        id: item.id,
-        type: itemType.name,
-        level: item.level,
-        preview: itemPreview(item, itemType).slice(0, 120),
-        fields,
-        status: item.status,
-        stageIndex,
-        reviews: itemCards.reduce((s, c) => s + c.stats.reviews, 0),
-        lapses: itemCards.reduce((s, c) => s + c.stats.lapses, 0),
-        ...(item.note ? { note: item.note.slice(0, 300) } : {}),
-      };
-    };
-
-    // struggling computed over the FULL item set, before the size truncation
-    const fullSnapshotItems = items
-      .map(toSnapshotItem)
-      .filter((x): x is SnapshotItem => x !== null);
-    const snapshotItems = fullSnapshotItems.slice(0, MAX_ITEMS_PER_COURSE);
-
-    const struggling = fullSnapshotItems
-      .filter((i) => i.lapses >= 2)
-      .sort((a, b) => b.lapses - a.lapses)
-      .slice(0, 15);
-
-    out.push({
-      id: course.id,
-      name: course.name,
-      description: course.description,
-      scheduling: course.scheduling.kind,
-      ladder: ladder
-        ? {
-            name: ladder.name,
-            stages: ladder.stages.map((s) => s.name),
-            passesAtIndex: ladder.passesAtIndex,
+        const toSnapshotItem = (item: Item): SnapshotItem | null => {
+          const itemType = typeById.get(item.typeId);
+          if (!itemType) return null;
+          const fields: Record<string, string> = {};
+          for (const f of itemType.fields) {
+            if (f.kind === 'image' || f.kind === 'audio') continue;
+            const v = item.fieldValues[f.id];
+            const text = isClozeSentences(v)
+              ? clozeSummary(v)
+              : typeof v === 'string'
+                ? v
+                : Array.isArray(v)
+                  ? (v as string[]).join(', ')
+                  : '';
+            if (text) fields[f.name] = text.slice(0, 200);
           }
-        : null,
-      lessons: course.lessons,
-      currentLevel: course.currentLevel,
-      plan: plan
-        ? {
-            releaseMode: plan.releaseMode,
-            hasMaterial: plan.material.length > 0,
-            units: plan.units.map((u) => ({
-              level: u.level,
-              title: u.title,
-              summary: u.summary,
-              topics: u.topics,
-              targetCount: u.targetCount,
-              released: u.level <= course.currentLevel,
-              releaseAt:
-                u.releaseAt === undefined ? null : new Date(u.releaseAt).toISOString().slice(0, 10),
-              pendingProposals: pendingByLevel.get(u.level) ?? 0,
+          const itemCards = cardsByItem.get(item.id) ?? [];
+          const stageIndex = itemCards.reduce<number | null>((min, c) => {
+            if (c.state !== 'review' || c.srs?.kind !== 'ladder') return min;
+            return min === null ? c.srs.stageIndex : Math.min(min, c.srs.stageIndex);
+          }, null);
+          return {
+            id: item.id,
+            type: itemType.name,
+            level: item.level,
+            preview: itemPreview(item, itemType).slice(0, 120),
+            fields,
+            status: item.status,
+            stageIndex,
+            reviews: itemCards.reduce((s, c) => s + c.stats.reviews, 0),
+            lapses: itemCards.reduce((s, c) => s + c.stats.lapses, 0),
+            ...(item.note ? { note: item.note.slice(0, 300) } : {}),
+          };
+        };
+
+        // struggling computed over the FULL item set, before the size truncation
+        const fullSnapshotItems = items
+          .map(toSnapshotItem)
+          .filter((x): x is SnapshotItem => x !== null);
+        const snapshotItems = fullSnapshotItems.slice(0, MAX_ITEMS_PER_COURSE);
+
+        const struggling = fullSnapshotItems
+          .filter((i) => i.lapses >= 2)
+          .sort((a, b) => b.lapses - a.lapses)
+          .slice(0, 15);
+
+        out.push({
+          id: course.id,
+          name: course.name,
+          description: course.description,
+          scheduling: course.scheduling.kind,
+          ladder: ladder
+            ? {
+                name: ladder.name,
+                stages: ladder.stages.map((s) => s.name),
+                passesAtIndex: ladder.passesAtIndex,
+              }
+            : null,
+          lessons: course.lessons,
+          currentLevel: course.currentLevel,
+          plan: plan
+            ? {
+                releaseMode: plan.releaseMode,
+                hasMaterial: plan.material.length > 0,
+                units: plan.units.map((u) => ({
+                  level: u.level,
+                  title: u.title,
+                  summary: u.summary,
+                  topics: u.topics,
+                  targetCount: u.targetCount,
+                  released: u.level <= course.currentLevel,
+                  releaseAt:
+                    u.releaseAt === undefined
+                      ? null
+                      : new Date(u.releaseAt).toISOString().slice(0, 10),
+                  pendingProposals: pendingByLevel.get(u.level) ?? 0,
+                })),
+              }
+            : null,
+          itemTypes: types.map((t) => ({
+            name: t.name,
+            icon: t.icon,
+            fields: t.fields.map((f) => ({ name: f.name, kind: f.kind })),
+            templates: t.templates.map((tpl) => ({
+              name: tpl.name,
+              promptFields: tpl.promptFieldIds.map(
+                (id) => t.fields.find((f) => f.id === id)?.name ?? id,
+              ),
+              answerField:
+                t.fields.find((f) => f.id === tpl.answerFieldId)?.name ?? tpl.answerFieldId,
+              mode: tpl.grading.mode,
+              ...(tpl.grading.mode === 'typed'
+                ? { answerLang: tpl.grading.answerLang, typoTolerance: tpl.grading.typoTolerance }
+                : {}),
+              ...(tpl.grading.mode === 'choice' ? { choices: tpl.grading.choices } : {}),
+              ...(tpl.grading.mode === 'sentenceCloze' ? { rotation: tpl.grading.rotation } : {}),
+              hintFields: tpl.hintFieldIds.map(
+                (id) => t.fields.find((field) => field.id === id)?.name ?? id,
+              ),
             })),
-          }
-        : null,
-      itemTypes: types.map((t) => ({
-        name: t.name,
-        icon: t.icon,
-        fields: t.fields.map((f) => ({ name: f.name, kind: f.kind })),
-        templates: t.templates.map((tpl) => ({
-          name: tpl.name,
-          promptFields: tpl.promptFieldIds.map(
-            (id) => t.fields.find((f) => f.id === id)?.name ?? id,
-          ),
-          answerField: t.fields.find((f) => f.id === tpl.answerFieldId)?.name ?? tpl.answerFieldId,
-        })),
-      })),
-      counts: {
-        items: items.length,
-        lessonQueue: items.filter((i) => i.status === 'lesson').length,
-        active: items.filter((i) => i.status === 'active').length,
-        dueNow: reviewCards.filter((c) => c.dueAt !== undefined && c.dueAt <= now).length,
-        burnedCards: burned,
-        pendingProposals,
-      },
-      items: snapshotItems,
-      struggling,
-      itemsTruncated: items.length > MAX_ITEMS_PER_COURSE,
-    });
-  }
+          })),
+          counts: {
+            items: items.length,
+            lessonQueue: items.filter((i) => i.status === 'lesson').length,
+            active: items.filter((i) => i.status === 'active').length,
+            dueNow: reviewCards.filter((c) => c.dueAt !== undefined && c.dueAt <= now).length,
+            burnedCards: burned,
+            pendingProposals,
+          },
+          items: snapshotItems,
+          struggling,
+          itemsTruncated: items.length > MAX_ITEMS_PER_COURSE,
+        });
+      }
 
-  return {
-    format: 'srs-snapshot',
-    version: 1,
-    generatedAt: now,
-    localDay: startOfLocalDay(now),
-    courses: out,
-  };
+      return {
+        format: 'srs-snapshot',
+        version: 1,
+        generatedAt: now,
+        localDay: startOfLocalDay(now),
+        courses: out,
+      } satisfies Snapshot;
+    },
+  );
 }

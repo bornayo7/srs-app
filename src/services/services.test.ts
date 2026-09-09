@@ -4,8 +4,9 @@ import { createCourse } from '@/db/repo/courses';
 import { createItem } from '@/db/repo/items';
 import { createItemType, basicTypeSpec } from '@/db/repo/itemTypes';
 import { dueCards } from '@/db/repo/cards';
-import { commitReview } from './commitReview';
-import { completeLessonBatch, lessonAvailability, nextLessonBatch } from './lessons';
+import { reviewCard as commitReview } from '@/test/study';
+import { lessonAvailability, nextLessonBatch } from './lessons';
+import { teachItems as completeLessonBatch } from '@/test/study';
 import { undoReview } from './undo';
 import { exportAll } from '@/db/export';
 import { importAll } from '@/db/import';
@@ -75,7 +76,11 @@ describe('lesson flow', () => {
 
     const batch = await nextLessonBatch(course.id, NOW);
     expect(batch).toHaveLength(2);
-    await completeLessonBatch(batch.map((i) => i.id), 's', NOW);
+    await completeLessonBatch(
+      batch.map((i) => i.id),
+      's',
+      NOW,
+    );
 
     avail = await lessonAvailability(course.id, NOW + HOUR);
     expect(avail.available).toBe(0);
@@ -112,9 +117,19 @@ describe('commitReview', () => {
     const { card } = await activated();
     // climb to stage 2 first
     let t = card.dueAt! + 1;
-    await commitReview({ cardId: card.id, sessionId: 's', outcome: { kind: 'ladder', incorrectCount: 0 }, now: t });
+    await commitReview({
+      cardId: card.id,
+      sessionId: 's',
+      outcome: { kind: 'ladder', incorrectCount: 0 },
+      now: t,
+    });
     t += 9 * HOUR;
-    await commitReview({ cardId: card.id, sessionId: 's', outcome: { kind: 'ladder', incorrectCount: 0 }, now: t });
+    await commitReview({
+      cardId: card.id,
+      sessionId: 's',
+      outcome: { kind: 'ladder', incorrectCount: 0 },
+      now: t,
+    });
     t += 24 * HOUR;
     const res = await commitReview({
       cardId: card.id,
@@ -170,7 +185,7 @@ describe('commitReview', () => {
       cardId: card.id,
       sessionId: 's',
       outcome: { kind: 'ladder', incorrectCount: 0 },
-      now: NOW + HOUR,
+      now: card.dueAt!,
     });
     expect(res.burned).toBe(true);
     const after = (await db.cards.get(card.id))!;
@@ -181,7 +196,7 @@ describe('commitReview', () => {
 });
 
 describe('backup round trip', () => {
-  it('export → wipe → import restores identical table contents', async () => {
+  it('export → wipe → import preserves study contents while starting a fresh operation lifetime', async () => {
     const { course, item, card } = await seedOneItem();
     await completeLessonBatch([item.id], 's', NOW);
     await commitReview({
@@ -208,7 +223,24 @@ describe('backup round trip', () => {
     expect(counts).toEqual({ courses: 1, items: 1 });
 
     const after = await dump();
-    expect(after).toEqual(before);
+    const generation = after.cards[0].generation;
+    expect(generation).not.toBe(before.cards[0].generation);
+    expect(after).toEqual({
+      ...before,
+      cards: before.cards.map((row) => ({ ...row, generation })),
+      items: before.items.map((row) => ({ ...row, generation })),
+      itemTypes: before.itemTypes.map((row) => ({ ...row, generation })),
+      logs: before.logs.map((row) => {
+        const history = { ...row };
+        delete history.appliedRev;
+        delete history.itemRev;
+        delete history.typeRev;
+        delete history.appliedGeneration;
+        delete history.itemGeneration;
+        delete history.typeGeneration;
+        return history;
+      }),
+    });
     expect((await db.courses.get(course.id))!.name).toBe('Test');
   });
 
@@ -280,6 +312,6 @@ describe('backup round trip', () => {
     const keys = (backup.data.meta as { key: string }[]).map((m) => m.key);
     expect(keys).not.toContain('ai:apiKey');
     expect(keys).not.toContain('exchange:dirHandle');
-    expect(keys).toContain('devClockOffsetMs');
+    expect(keys).not.toContain('devClockOffsetMs'); // a device's test clock is local configuration
   });
 });

@@ -1,15 +1,18 @@
+import { nextRevision } from '@/engine/revision';
 import { db } from '@/db/db';
 import { newId } from '@/engine/ids';
 import type { Card, CardSnapshot, ReviewLog, ReviewOutcome } from '@/engine/types';
 import { ghostScheduler, schedulerForCourse } from './schedulers';
 import { maybeSpawnGhost } from './ghosts';
 import { applyGatingAfterReview, type GatingOutcome } from './gating';
+import { requireStudyRevision, StudyConflict, type StudyRevision } from './studyRevision';
 
 export interface CommitReviewInput {
   cardId: string;
   sessionId: string;
   outcome: ReviewOutcome;
   now: number;
+  expected: StudyRevision;
 }
 
 export interface CommitReviewResult {
@@ -22,18 +25,6 @@ export interface CommitReviewResult {
   gating: GatingOutcome;
 }
 
-type PostCommitHook = (args: { card: Card; now: number }) => Promise<void>;
-
-/**
- * Ordered hooks run inside the same transaction after the card is written.
- * P2 slots prerequisite-gating and level-up cascades in here without touching
- * the write path itself.
- */
-const postCommitHooks: PostCommitHook[] = [];
-export function registerPostCommitHook(hook: PostCommitHook): void {
-  postCommitHooks.push(hook);
-}
-
 /**
  * THE atomic write path for a review answer:
  * applyReview → write card → append log (with full prev snapshot) → hooks.
@@ -42,12 +33,22 @@ export function registerPostCommitHook(hook: PostCommitHook): void {
 export async function commitReview(input: CommitReviewInput): Promise<CommitReviewResult> {
   return db.transaction(
     'rw',
-    [db.cards, db.items, db.courses, db.ladders, db.reviewLogs],
+    [db.cards, db.items, db.itemTypes, db.courses, db.ladders, db.reviewLogs, db.cardTombstones],
     async () => {
       const card = await db.cards.get(input.cardId);
-      if (!card) throw new Error(`card not found: ${input.cardId}`);
+      if (!card)
+        throw new StudyConflict('This card was removed or already completed. Reload the session.');
+      const { item, type } = await requireStudyRevision(card, input.expected);
       if (card.state !== 'review' || card.srs === null) {
-        throw new Error(`card is not reviewable (state=${card.state})`);
+        throw new StudyConflict(`This card is no longer ready for review (${card.state}).`);
+      }
+      if (card.dueAt === undefined || card.dueAt > input.now)
+        throw new StudyConflict('This review is not due yet.');
+      if (
+        input.outcome.kind === 'ladder' &&
+        (!Number.isInteger(input.outcome.incorrectCount) || input.outcome.incorrectCount < 0)
+      ) {
+        throw new Error('Invalid review outcome.');
       }
       const course = await db.courses.get(card.courseId);
       if (!course) throw new Error(`course not found: ${card.courseId}`);
@@ -72,6 +73,7 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
 
       const updated: Card = {
         ...card,
+        rev: nextRevision(card.rev),
         srs: applied.srs,
         state: applied.dueAt === null ? 'burned' : 'review',
         stats: {
@@ -87,16 +89,26 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
         updated.dueAt = applied.dueAt;
       }
       const ghostGraduated = applied.dueAt === null && card.isGhost === true;
+      const logId = newId();
       if (ghostGraduated) {
         // graduating a ghost deletes it — the log's cardMeta allows undo to resurrect
         await db.cards.delete(card.id);
+        await db.cardTombstones.put({
+          id: card.id,
+          itemId: card.itemId,
+          courseId: card.courseId,
+          templateId: card.templateId,
+          rev: updated.rev,
+          generation: card.generation,
+          logId,
+        });
       } else {
         await db.cards.put(updated);
       }
 
       const toStage = applied.srs.kind === 'ladder' ? applied.srs.stageIndex : null;
       const log: ReviewLog = {
-        id: newId(),
+        id: logId,
         cardId: card.id,
         itemId: card.itemId,
         courseId: card.courseId,
@@ -118,6 +130,12 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
                 scheduledDays: 0,
               },
         prev,
+        appliedRev: updated.rev,
+        appliedGeneration: card.generation,
+        itemRev: item.rev,
+        typeRev: type.rev,
+        itemGeneration: item.generation,
+        typeGeneration: type.generation,
         cardMeta: {
           templateId: card.templateId,
           ...(card.isGhost ? { isGhost: true, parentCardId: card.parentCardId } : {}),
@@ -134,10 +152,6 @@ export async function commitReview(input: CommitReviewInput): Promise<CommitRevi
       const gating = card.isGhost
         ? { itemPassed: false, unlockedItemIds: [], leveledUpTo: null }
         : await applyGatingAfterReview(course, card.itemId, input.now);
-
-      for (const hook of postCommitHooks) {
-        await hook({ card: updated, now: input.now });
-      }
 
       return {
         logId: log.id,

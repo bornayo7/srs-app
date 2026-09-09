@@ -1,12 +1,8 @@
 import { db } from '@/db/db';
 import { buildMatchContext } from '@/engine/grading/context';
 import { matchTypedAnswer } from '@/engine/grading/match';
-import {
-  buildChoiceOptions,
-  MIN_CHOICE_OPTIONS,
-  type ChoiceOption,
-} from '@/engine/grading/choice';
-import type { CardTemplate, FieldValue, Item, ItemType } from '@/engine/types';
+import { buildChoiceOptions, MIN_CHOICE_OPTIONS, type ChoiceOption } from '@/engine/grading/choice';
+import type { CardTemplate, Item, ItemType } from '@/engine/types';
 
 /**
  * Distractors for a multiple-choice card: the same question asked of the
@@ -28,12 +24,6 @@ async function itemsOfType(typeId: string, cache?: ChoiceCache): Promise<Item[]>
   return items;
 }
 
-function firstText(v: FieldValue | undefined): string | null {
-  if (typeof v === 'string') return v.trim() || null;
-  if (Array.isArray(v) && typeof v[0] === 'string') return (v[0] as string).trim() || null;
-  return null; // cloze sentences never make sense as a flat option
-}
-
 export async function buildEntryChoices(
   entry: { item: Item; itemType: ItemType; template: CardTemplate },
   seed: number,
@@ -50,8 +40,11 @@ export async function buildEntryChoices(
     (i) => i.id !== item.id && i.courseId === item.courseId,
   );
   const candidates = siblings
-    .map((i) => ({ level: i.level, text: firstText(i.fieldValues[template.answerFieldId]) }))
-    .filter((c): c is { level: number; text: string } => c.text !== null)
+    .map((i) => ({ level: i.level, text: buildMatchContext(i, itemType, template).accepted[0] }))
+    .filter(
+      (c): c is { level: number; text: string } =>
+        typeof c.text === 'string' && c.text.trim().length > 0,
+    )
     // The real grading pipeline is the fairness filter: anything it would
     // accept (a synonym, something inside the typo budget) or bounce with
     // guidance must never be offered as a wrong option.

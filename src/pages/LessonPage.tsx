@@ -1,286 +1,307 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import { db } from '@/db/db';
+import { db, requestPersistentStorage } from '@/db/db';
 import type { Item, ItemType } from '@/engine/types';
-import { matchTypedAnswer } from '@/engine/grading/match';
-import { isClozeSentences, revealBlank } from '@/engine/grading/cloze';
+import { clozeSummary, isClozeSentences } from '@/engine/grading/cloze';
 import {
-  entryMatchContext,
-  withChoices,
-  withClozePick,
+  practiceFeedback,
+  type Feedback,
+  type QuestionProblem,
   type SessionEntry,
-} from '@/stores/sessionStore';
-import { newChoiceCache } from '@/services/choices';
+} from '@/engine/question';
 import { seededShuffle, mulberry32 } from '@/engine/queue';
 import { newId } from '@/engine/ids';
 import { completeLessonBatch, lessonAvailability, nextLessonBatch } from '@/services/lessons';
+import { prepareQuestions } from '@/services/questions';
+import { studyRevision } from '@/services/studyRevision';
 import { now } from '@/services/clock';
-import { requestPersistentStorage } from '@/db/db';
 import { maybeRefreshSnapshot } from '@/exchange/exchange';
 import { speak, stopSpeaking, ttsSupported } from '@/services/tts';
 import { Button, Badge } from '@/components/ui';
-import { MediaAudio, MediaImage } from '@/components/MediaImage';
 import { RichText } from '@/components/RichText';
 import { richTextToPlain } from '@/engine/richtext';
 import { AnswerInput } from '@/components/review/AnswerInput';
 import { CardPrompt } from '@/components/review/CardPrompt';
-import type { Feedback } from '@/stores/sessionStore';
+import { QuestionField } from '@/components/review/QuestionField';
+import { QuestionProblems } from '@/components/review/QuestionProblems';
 
 type Phase =
   | { kind: 'loading' }
   | { kind: 'none' }
-  | { kind: 'study'; items: Item[]; types: Map<string, ItemType>; index: number }
+  | { kind: 'error'; message: string }
   | {
-      kind: 'quiz';
+      kind: 'study';
       items: Item[];
       types: Map<string, ItemType>;
-      queue: SessionEntry[];
-      total: number;
+      index: number;
+      questions: SessionEntry[];
     }
-  | { kind: 'batchDone'; remaining: number };
+  | { kind: 'quiz'; queue: SessionEntry[]; taught: SessionEntry[]; total: number }
+  | { kind: 'batchDone'; remaining: number; taught: number };
 
-/**
- * Lesson flow: study a batch (read every item), then a quiz gate — each card
- * answered correctly once; wrong answers just recycle. Only completing the
- * batch schedules the items into the review cycle.
- */
+/** A batch keeps the exact questions studied. Finishing cannot activate a later-added card. */
 export default function LessonPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [problems, setProblems] = useState<QuestionProblem[]>([]);
   const [batchError, setBatchError] = useState('');
-  // a load still in flight when the course changes must not show the old course's batch
+  const [busy, setBusy] = useState(false);
   const loadGeneration = useRef(0);
+  const saving = useRef(false);
+  const feedbackLock = useRef(false);
 
   const loadBatch = useCallback(async () => {
-    if (!courseId) return;
     const generation = ++loadGeneration.current;
-    const batch = await nextLessonBatch(courseId, now());
-    const types = new Map<string, ItemType>();
-    for (const it of batch) {
-      if (!types.has(it.typeId)) {
-        const t = await db.itemTypes.get(it.typeId);
-        if (t) types.set(t.id, t);
-      }
-    }
-    if (generation !== loadGeneration.current) return;
-    // drop items whose type no longer resolves — rendering them would crash
-    const teachable = batch.filter((it) => types.has(it.typeId));
-    if (teachable.length === 0) {
+    const stale = () => generation !== loadGeneration.current;
+    setPhase({ kind: 'loading' });
+    setProblems([]);
+    setFeedback(null);
+    setBatchError('');
+    setBusy(false);
+    saving.current = false;
+    feedbackLock.current = false;
+    if (!courseId) {
       setPhase({ kind: 'none' });
       return;
     }
-    setPhase({ kind: 'study', items: teachable, types, index: 0 });
+    try {
+      const batch = await nextLessonBatch(courseId, now());
+      if (stale()) return;
+      if (!batch.length) {
+        setPhase({ kind: 'none' });
+        return;
+      }
+      const cards = (
+        await db.cards
+          .where('itemId')
+          .anyOf(batch.map((i) => i.id))
+          .toArray()
+      ).filter((c) => c.state === 'new' && !c.isGhost);
+      const prepared = await prepareQuestions(cards, now() & 0x7fffffff);
+      if (stale()) return;
+      setProblems(prepared.problems);
+      const itemById = new Map(prepared.entries.map((e) => [e.item.id, e.item]));
+      const items = batch.flatMap((i) => (itemById.has(i.id) ? [itemById.get(i.id)!] : []));
+      const types = new Map(prepared.entries.map((e) => [e.itemType.id, e.itemType]));
+      if (!items.length) {
+        setPhase({ kind: 'none' });
+        return;
+      }
+      setPhase({ kind: 'study', items, types, index: 0, questions: prepared.entries });
+    } catch (err) {
+      if (!stale())
+        setPhase({
+          kind: 'error',
+          message: err instanceof Error ? err.message : 'Could not load lessons.',
+        });
+    }
   }, [courseId]);
 
   useEffect(() => {
     void loadBatch();
+    return () => {
+      loadGeneration.current++;
+      stopSpeaking();
+    };
   }, [loadBatch]);
 
-  // stop any in-flight speech when leaving the lesson flow
-  useEffect(() => stopSpeaking, []);
-
-  async function startQuiz(items: Item[], types: Map<string, ItemType>) {
-    const seed = Date.now() & 0x7fffffff;
-    const cache = newChoiceCache();
-    const entries: SessionEntry[] = [];
-    for (const item of items) {
-      const itemType = types.get(item.typeId);
-      if (!itemType) continue;
-      const cards = await db.cards.where('itemId').equals(item.id).toArray();
-      for (const card of cards) {
-        // skip cards whose template no longer exists on the type
-        const template = itemType.templates.find((t) => t.id === card.templateId);
-        if (card.state === 'new' && template) {
-          const s = seed + entries.length;
-          entries.push(
-            await withChoices(withClozePick({ card, item, itemType, template }, s), s, cache),
-          );
-        }
-      }
-    }
-    if (entries.length === 0) {
-      // nothing quizzable (e.g. items already activated elsewhere) — complete directly
-      await finishBatch(items);
-      return;
-    }
-    const queue = seededShuffle(entries, mulberry32(Date.now() & 0x7fffffff));
-    setPhase({ kind: 'quiz', items, types, queue, total: queue.length });
-    setFeedback(null);
-  }
-
-  async function finishBatch(items: Item[]) {
+  async function finishBatch(taught: SessionEntry[]) {
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    const generation = loadGeneration.current;
     try {
       await completeLessonBatch(
-        items.map((i) => i.id),
+        taught.map((e) => ({
+          cardId: e.card.id,
+          expected: studyRevision(e.card, e.item, e.itemType),
+        })),
         newId(),
         now(),
       );
+      if (generation !== loadGeneration.current) return;
+      void requestPersistentStorage();
+      void maybeRefreshSnapshot(now());
+      setBatchError('');
+      setFeedback(null);
+      setPhase({ kind: 'batchDone', remaining: 0, taught: taught.length });
+      // The batch is durable already. A failed availability refresh must never
+      // ask the learner to submit it a second time.
+      try {
+        const avail = courseId ? await lessonAvailability(courseId, now()) : null;
+        if (generation === loadGeneration.current)
+          setPhase({ kind: 'batchDone', remaining: avail?.available ?? 0, taught: taught.length });
+      } catch {
+        if (generation === loadGeneration.current)
+          setBatchError('Your batch was saved. Reload lessons to check the next allowance.');
+      }
     } catch (err) {
-      setBatchError(`Could not complete the batch: ${(err as Error).message} — try again.`);
-      return;
+      if (generation === loadGeneration.current)
+        setBatchError(err instanceof Error ? err.message : 'Could not save this batch. Try again.');
+    } finally {
+      if (generation === loadGeneration.current) {
+        saving.current = false;
+        setBusy(false);
+      }
     }
-    setBatchError('');
-    void requestPersistentStorage();
-    void maybeRefreshSnapshot(now());
-    const avail = courseId ? await lessonAvailability(courseId, now()) : null;
-    setPhase({ kind: 'batchDone', remaining: avail?.available ?? 0 });
   }
 
-  if (phase.kind === 'loading') {
-    return <p className="py-16 text-center text-slate-500">Loading lessons…</p>;
-  }
-
-  if (phase.kind === 'none') {
+  if (phase.kind === 'loading')
     return (
-      <div className="py-16 text-center">
-        <div className="text-4xl">📚</div>
-        <p className="mt-2 text-slate-300">No lessons available right now.</p>
-        <p className="mt-1 text-xs text-slate-500">
-          Either the pool is empty or today's new-item limit is reached.
-        </p>
-        <Link to="/" className="mt-4 inline-block">
-          <Button>Back to dashboard</Button>
-        </Link>
+      <p role="status" className="py-16 text-center text-slate-500">
+        Loading lessons…
+      </p>
+    );
+  if (phase.kind === 'error')
+    return (
+      <div role="alert" className="py-16 text-center">
+        <p>{phase.message}</p>
+        <Button onClick={() => void loadBatch()}>Try again</Button>
       </div>
     );
-  }
-
-  if (phase.kind === 'batchDone') {
+  if (phase.kind === 'none')
     return (
-      <div className="py-16 text-center">
-        <div className="text-4xl">✅</div>
-        <p className="mt-2 text-slate-200">Batch complete — items scheduled for review.</p>
-        <p className="mt-1 text-xs text-slate-500">
-          First review lands after the ladder's first interval, on the hour.
+      <div className="mx-auto max-w-xl py-12 text-center">
+        <h1 className="text-xl font-semibold">
+          {problems.length ? 'These lessons need attention' : 'No lessons available right now'}
+        </h1>
+        <p className="mt-2 text-slate-400">
+          {problems.length
+            ? 'Repair the listed questions, then reload the batch.'
+            : "The pool is empty or today's allowance is used."}
         </p>
-        <div className="mt-4 flex justify-center gap-2">
-          {phase.remaining > 0 && (
-            <Button variant="primary" onClick={() => void loadBatch()}>
-              Next batch · {phase.remaining} left today
-            </Button>
-          )}
-          <Link to="/">
-            <Button>Done</Button>
+        <QuestionProblems problems={problems} courseId={courseId!} />
+        <div className="mt-4 flex justify-center gap-3">
+          <Button onClick={() => void loadBatch()}>Reload lessons</Button>
+          <Link className="p-2 text-violet-300" to={`/course/${courseId}`}>
+            Back to course
           </Link>
         </div>
       </div>
     );
-  }
+  if (phase.kind === 'batchDone')
+    return (
+      <div className="mx-auto max-w-xl py-12 text-center">
+        <h1 className="text-xl font-semibold">Batch complete</h1>
+        <p className="mt-2 text-slate-300">
+          {phase.taught} questions scheduled for their first review.
+        </p>
+        {batchError && (
+          <p role="status" className="mt-2 text-sm">
+            {batchError}
+          </p>
+        )}
+        <QuestionProblems problems={problems} courseId={courseId!} />
+        <div className="mt-4 flex justify-center gap-3">
+          {phase.remaining > 0 && (
+            <Button variant="primary" onClick={() => void loadBatch()}>
+              Next batch · {phase.remaining} available
+            </Button>
+          )}
+          <Link className="p-2 text-violet-300" to="/">
+            Done
+          </Link>
+        </div>
+      </div>
+    );
 
   if (phase.kind === 'study') {
     const item = phase.items[phase.index];
-    const itemType = phase.types.get(item.typeId)!;
-    const last = phase.index === phase.items.length - 1;
+    const type = phase.types.get(item.typeId)!;
     return (
       <div className="mx-auto max-w-xl">
-        <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
+        <QuestionProblems problems={problems} courseId={courseId!} />
+        <div className="mb-3 flex items-center justify-between text-sm text-slate-400">
           <span>
             Lesson {phase.index + 1} / {phase.items.length}
           </span>
-          <Badge color="violet">study</Badge>
+          <Badge color="violet">Study</Badge>
         </div>
-        <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-xl">
+        <div
+          key={item.id}
+          className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900"
+        >
           <div
-            className="px-4 py-2 text-sm font-semibold text-white/95"
-            style={{ backgroundColor: itemType.color }}
+            className="px-4 py-2 text-sm font-semibold text-white"
+            style={{ backgroundColor: type.color }}
           >
-            {itemType.icon} {itemType.name}
+            {type.icon} {type.name}
           </div>
-          <div className="space-y-4 px-6 py-6">
-            {itemType.fields.map((f) => {
-              const v = item.fieldValues[f.id];
-              if (isClozeSentences(v)) {
-                return (
-                  <div key={f.id}>
-                    <div className="text-[10px] uppercase tracking-widest text-slate-500">
-                      {f.name}
-                    </div>
-                    <ul className="mt-1 space-y-1.5">
-                      {v.map((s, i) => (
-                        <li key={i} className="text-base text-slate-100">
-                          {revealBlank(s.text)}
-                          {s.translation && (
-                            <span className="ml-2 text-sm italic text-slate-500">
-                              {s.translation}
-                            </span>
-                          )}
-                          {ttsSupported() && (
-                            <button
-                              className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-xs hover:bg-slate-700"
-                              title="Read aloud"
-                              onClick={() => speak(revealBlank(s.text))}
-                            >
-                              🔊
-                            </button>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                );
-              }
-              const text =
-                typeof v === 'string' ? v : Array.isArray(v) ? (v as string[]).join(', ') : '';
-              if (!text) return null;
-              if (f.kind === 'image' || f.kind === 'audio') {
-                return (
-                  <div key={f.id}>
-                    <div className="text-[10px] uppercase tracking-widest text-slate-500">
-                      {f.name}
-                    </div>
-                    {f.kind === 'image' ? (
-                      <MediaImage id={text} alt={f.name} className="max-h-56" />
-                    ) : (
-                      <MediaAudio id={text} />
-                    )}
-                  </div>
-                );
-              }
+          <div className="space-y-5 p-6">
+            {type.fields.map((field) => {
+              const value = item.fieldValues[field.id];
+              if (value === undefined || value === '' || (Array.isArray(value) && !value.length))
+                return null;
+              const text = isClozeSentences(value)
+                ? clozeSummary(value)
+                : typeof value === 'string'
+                  ? value
+                  : value.join(', ');
+              const readable = field.kind !== 'image' && field.kind !== 'audio';
               return (
-                <div key={f.id}>
-                  <div className="text-[10px] uppercase tracking-widest text-slate-500">
-                    {f.name}
+                <div key={field.id}>
+                  <div className="mb-1 text-sm font-medium text-slate-400">{field.name}</div>
+                  <div className="study-prompt text-xl leading-relaxed text-slate-100">
+                    <QuestionField kind={field.kind} value={value} name={field.name} />
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="text-2xl font-semibold text-slate-50">
-                      {f.kind === 'richtext' ? <RichText src={text} /> : text}
-                    </div>
-                    {ttsSupported() && (
-                      <button
-                        className="rounded bg-slate-800 px-1.5 py-0.5 text-xs hover:bg-slate-700"
-                        title="Read aloud"
-                        onClick={() => speak(richTextToPlain(text))}
-                      >
-                        🔊
-                      </button>
-                    )}
-                  </div>
+                  {readable && ttsSupported() && (
+                    <button
+                      type="button"
+                      className="mt-1 rounded bg-slate-800 px-2 py-1 text-sm"
+                      aria-label={`Read ${field.name} aloud`}
+                      onClick={() => speak(richTextToPlain(text))}
+                    >
+                      Read aloud
+                    </button>
+                  )}
                 </div>
               );
             })}
             {item.note && (
-              <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
-                <span className="mr-1 text-xs uppercase tracking-widest text-slate-500">note</span>
+              <div className="rounded-lg bg-slate-950/60 p-3 text-sm">
+                <span className="mr-2 font-medium">Note</span>
                 <RichText src={item.note} />
               </div>
             )}
           </div>
         </div>
-        <div className="mt-4 flex justify-between">
+        <div className="mt-4 flex justify-between gap-3">
           <Button
             disabled={phase.index === 0}
-            onClick={() => setPhase({ ...phase, index: phase.index - 1 })}
+            onClick={() => {
+              stopSpeaking();
+              setPhase({ ...phase, index: phase.index - 1 });
+            }}
           >
-            ← Back
+            Back
           </Button>
-          {last ? (
-            <Button variant="primary" onClick={() => void startQuiz(phase.items, phase.types)}>
-              Quiz the batch →
+          {phase.index === phase.items.length - 1 ? (
+            <Button
+              variant="primary"
+              onClick={() => {
+                stopSpeaking();
+                feedbackLock.current = false;
+                setFeedback(null);
+                setPhase({
+                  kind: 'quiz',
+                  queue: seededShuffle(phase.questions, mulberry32(now() & 0x7fffffff)),
+                  taught: phase.questions,
+                  total: phase.questions.length,
+                });
+              }}
+            >
+              Quiz the batch
             </Button>
           ) : (
-            <Button variant="primary" onClick={() => setPhase({ ...phase, index: phase.index + 1 })}>
-              Next →
+            <Button
+              variant="primary"
+              onClick={() => {
+                stopSpeaking();
+                setPhase({ ...phase, index: phase.index + 1 });
+              }}
+            >
+              Next
             </Button>
           )}
         </div>
@@ -288,18 +309,16 @@ export default function LessonPage() {
     );
   }
 
-  // quiz
   const entry = phase.queue[0];
   if (!entry) return null;
-  const done = phase.total - phase.queue.length;
-
   return (
     <div className="mx-auto max-w-xl">
-      <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
+      <QuestionProblems problems={problems} courseId={courseId!} />
+      <div className="mb-3 flex items-center justify-between gap-3 text-sm text-slate-400">
         <span>
-          Quiz {done} / {phase.total}
+          Quiz {phase.total - phase.queue.length} / {phase.total}
         </span>
-        <Badge color="amber">lesson quiz — no SRS effect</Badge>
+        <Badge color="amber">Lesson quiz</Badge>
       </div>
       <CardPrompt key={entry.card.id} entry={entry} feedback={feedback} />
       <div className="mt-5">
@@ -307,40 +326,36 @@ export default function LessonPage() {
           key={entry.card.id}
           entry={entry}
           feedback={feedback}
+          busy={busy}
           onSubmit={(text) => {
-            const ctx = entryMatchContext(entry);
-            const v = matchTypedAnswer(text, ctx);
-            if (v.verdict === 'retry') {
-              setFeedback({ kind: 'retry', reason: v.reason, message: v.message, nonce: Date.now() });
-            } else if (v.verdict === 'incorrect') {
-              setFeedback({ kind: 'incorrect', accepted: ctx.accepted });
-            } else {
-              setFeedback({
-                kind: 'correct',
-                typo: v.verdict === 'correctWithTypo',
-                toStage: null,
-                burned: false,
-              });
-            }
+            if (feedbackLock.current || saving.current) return;
+            const next = practiceFeedback(entry, text);
+            feedbackLock.current = next.kind !== 'retry';
+            setFeedback(next);
           }}
           onContinue={() => {
+            if (saving.current || !feedbackLock.current) return;
             const [current, ...rest] = phase.queue;
-            if (feedback?.kind === 'correct') {
-              if (rest.length === 0) {
-                void finishBatch(phase.items);
-              } else {
-                setPhase({ ...phase, queue: rest });
-              }
-            } else if (feedback?.kind === 'incorrect') {
-              setPhase({ ...phase, queue: [...rest, current] }); // recycle to the end
+            if (feedback?.kind === 'correct' && rest.length === 0) {
+              void finishBatch(phase.taught);
+              return;
             }
+            feedbackLock.current = false;
+            setPhase({ ...phase, queue: feedback?.kind === 'correct' ? rest : [...rest, current] });
             setFeedback(null);
           }}
         />
       </div>
-      {batchError && <p className="mt-3 text-center text-sm text-rose-300">{batchError}</p>}
-      <p className="mt-3 text-center text-xs text-slate-500">
-        Answer every card correctly once to finish the batch.
+      {batchError && (
+        <div role="alert" className="mt-4 text-sm text-rose-300">
+          <p>{batchError}</p>
+          <Button className="mt-2" onClick={() => void loadBatch()}>
+            Reload batch
+          </Button>
+        </div>
+      )}
+      <p className="mt-3 text-center text-sm text-slate-400">
+        Answer every question correctly once to schedule this batch.
       </p>
     </div>
   );

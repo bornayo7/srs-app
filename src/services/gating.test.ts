@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db, ensurePresets } from '@/db/db';
 import { installSeed } from '@/db/seed';
 import { japaneseSeed } from '@/db/seed/japanese';
-import { commitReview } from './commitReview';
-import { completeLessonBatch } from './lessons';
+import { reviewCard as commitReview } from '@/test/study';
+import { teachItems as completeLessonBatch } from '@/test/study';
 import { createItem, deleteItem, lessonPool } from '@/db/repo/items';
 import { recomputeUnlocks } from './gating';
 import { HOUR } from '@/engine/time';
@@ -152,7 +152,7 @@ describe('prerequisite cascade', () => {
       cardId: card.id,
       sessionId: 's',
       outcome: { kind: 'ladder', incorrectCount: 4 },
-      now: t + HOUR,
+      now: Math.max(t, card.dueAt!) + HOUR,
     });
     expect((await db.items.get(radical.id))!.passedAt).not.toBeNull();
     expect((await db.items.get(kanji.id))!.status).toBe('lesson');
@@ -182,9 +182,7 @@ describe('level ups', () => {
 
     const after = await itemsOf(courseId);
     // level-2 radicals have no prereqs → open immediately on level up
-    const l2Radicals = after.filter(
-      (i) => i.level === 2 && i.prereqIds.length === 0,
-    );
+    const l2Radicals = after.filter((i) => i.level === 2 && i.prereqIds.length === 0);
     expect(l2Radicals.length).toBeGreaterThan(0);
     expect(l2Radicals.every((i) => i.status === 'lesson')).toBe(true);
     // 月's radical passed during level 1, so its level-2 kanji opens on level-up
@@ -326,7 +324,6 @@ describe('recomputeUnlocks', () => {
     // and the graph is no longer a cycle: at least one side is studiable now
     expect([aa.status, bb.status]).toContain('lesson');
   });
-
 
   it('re-locks items whose prereqs were edited in, and heals dangling refs', async () => {
     const courseId = await install();

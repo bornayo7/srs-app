@@ -46,7 +46,7 @@ describe('packet schema', () => {
 
   it('rejects garbage with a readable message', () => {
     expect(() => parsePacket({ hello: 'world' })).toThrow(/Not a valid srs-packet/);
-    expect(() => parsePacket({ ...validCreate, version: 2 })).toThrow(/version/);
+    expect(() => parsePacket({ ...validCreate, version: 99 })).toThrow(/version/);
   });
 
   it('rejects add-items with empty items', () => {
@@ -98,7 +98,7 @@ describe('applyPacket create-course', () => {
   it('rejects [""] as an answer value', async () => {
     const bad = structuredClone(validCreate) as unknown as { items: unknown[] };
     bad.items = [{ fields: { Spanish: 'el vaso', English: [''] } }];
-    await expect(applyPacket(parsePacket(bad), NOW)).rejects.toThrow(/missing answer field/);
+    await expect(applyPacket(parsePacket(bad), NOW)).rejects.toThrow(/English/);
   });
 
   it('resolves template field references case-insensitively', async () => {
@@ -126,7 +126,7 @@ describe('applyPacket create-course', () => {
   it('rejects a template referencing a missing field', async () => {
     const bad = structuredClone(validCreate);
     bad.itemTypes[0].templates[0].answerField = 'Missing';
-    await expect(applyPacket(parsePacket(bad), NOW)).rejects.toThrow(/unknown field "Missing"/);
+    expect(() => parsePacket(bad)).toThrow(/unknown field "Missing"/);
     expect(await db.courses.count()).toBe(0);
   });
 
@@ -134,7 +134,7 @@ describe('applyPacket create-course', () => {
     const bad = structuredClone(validCreate) as Record<string, unknown>;
     // no English → the Meaning template has no answer
     bad.items = [{ fields: { Spanish: 'el plato' } }];
-    await expect(applyPacket(parsePacket(bad), NOW)).rejects.toThrow(/missing answer field/);
+    await expect(applyPacket(parsePacket(bad), NOW)).rejects.toThrow(/English/);
   });
 });
 

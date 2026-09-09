@@ -5,7 +5,6 @@ import App from './App';
 import { ensurePresets } from './db/db';
 import { initClock, now } from './services/clock';
 import { backfillGatingOnce } from './services/gating';
-import { syncAllScheduledReleases } from './services/plans';
 
 /**
  * Shown instead of a blank page when the database can't be opened — another
@@ -17,11 +16,13 @@ function BootFailure({ error }: { error: unknown }) {
   return (
     <div className="mx-auto max-w-md px-4 py-16 text-center">
       <div className="text-4xl">⚠️</div>
-      <h1 className="mt-2 text-lg font-semibold text-slate-100">The app couldn't open its database</h1>
+      <h1 className="mt-2 text-lg font-semibold text-slate-100">
+        The app couldn't open its database
+      </h1>
       <p className="mt-2 text-sm text-slate-400">
-        Nothing was changed. This usually means another tab is running an older version, private
-        browsing is blocking storage, or the browser is out of space. Close other tabs of this app
-        and reload.
+        Startup could not finish. This can mean another tab is using an incompatible version,
+        private browsing is blocking storage, or the browser is out of space. Close other tabs of
+        this app and reload.
       </p>
       <pre className="mt-3 overflow-x-auto rounded-lg border border-slate-800 bg-slate-900 p-3 text-left text-xs text-rose-300">
         {message}
@@ -42,8 +43,6 @@ async function boot() {
     await ensurePresets();
     await initClock();
     await backfillGatingOnce(now());
-    // course plans released by date: raise the level floor to today's unit
-    await syncAllScheduledReleases(now());
   } catch (err) {
     console.error('boot failed', err);
     root.render(<BootFailure error={err} />);

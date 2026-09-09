@@ -11,7 +11,7 @@ export interface MatchContext {
   guidance: GuidanceAnswer[];
   /** Accepted answers of the item's OTHER templates (wrong-facet detection). */
   siblingAccepted: string[];
-  answerLang: 'latin' | 'kana';
+  answerLang: 'latin' | 'kana' | 'any';
   typoTolerance: boolean;
 }
 
@@ -61,9 +61,10 @@ export function matchTypedAnswer(raw: string, ctx: MatchContext): MatchVerdict {
     }
   }
 
-  if (ctx.typoTolerance && ctx.answerLang === 'latin') {
+  if (ctx.typoTolerance && ctx.answerLang !== 'kana') {
     let best: { matched: string; distance: number } | null = null;
     for (const a of accepted) {
+      if (containsKana(a)) continue;
       const budget = typoBudget(a.length);
       if (budget === 0) continue;
       const dist = osaDistance(a, input);

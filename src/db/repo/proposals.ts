@@ -17,6 +17,26 @@ export interface ProposalDraft {
   duplicateOf: string | null;
 }
 
+/** Handles and live item IDs share prerequisite syntax, so their targets cannot conflict. */
+export async function assertHandleDoesNotShadowItem(courseId: string, key: string | undefined): Promise<void> {
+  if (key && (await db.items.get(key))?.courseId === courseId) {
+    throw new Error(`The prerequisite key "${key}" is an existing item id. Choose a different handle.`);
+  }
+}
+
+/** Keys identify live prerequisites across batches; rejected/deleted content releases them. */
+export async function assertProposalKeyAvailable(courseId: string, key: string | undefined, exceptId?: string): Promise<void> {
+  if (!key) return;
+  await assertHandleDoesNotShadowItem(courseId, key);
+  const proposals = await db.proposals.where('courseId').equals(courseId).toArray();
+  for (const row of proposals) {
+    if (row.id === exceptId || row.item.key !== key || row.status === 'rejected') continue;
+    if (row.status === 'pending' || (row.acceptedItemId && await db.items.get(row.acceptedItemId))) {
+      throw new Error(`The prerequisite key "${key}" is already in use in this course. Choose a unique key.`);
+    }
+  }
+}
+
 /**
  * Persist drafts as pending proposals. Validation and duplicate detection are
  * the caller's job (importPacket owns type resolution) — this layer only
@@ -30,6 +50,14 @@ export async function addProposals(
   drafts: ProposalDraft[],
   now: number,
 ): Promise<Proposal[]> {
+  return db.transaction('rw', [db.proposals, db.items], async () => {
+  const keys = new Set<string>();
+  for (const draft of drafts) {
+    const key = draft.item.key;
+    if (key && keys.has(key)) throw new Error(`Duplicate prerequisite key "${key}".`);
+    if (key) keys.add(key);
+    await assertProposalKeyAvailable(courseId, key);
+  }
   let stamp = now;
   const rows: Proposal[] = drafts.map((d) => ({
     id: newId(),
@@ -49,6 +77,7 @@ export async function addProposals(
   }));
   await db.proposals.bulkAdd(rows);
   return rows;
+  });
 }
 
 /** Proposals for a course, unit order then authored order. */

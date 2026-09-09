@@ -1,18 +1,23 @@
 import Dexie, { type Table } from 'dexie';
 import type {
   Capture,
+  CardTombstone,
   Card,
   Course,
   CoursePlan,
+  DailyLesson,
   Item,
   ItemType,
   MediaAsset,
   MetaRow,
   Proposal,
+  PacketReceipt,
   ReviewLog,
   SrsLadder,
 } from '@/engine/types';
 import { LADDER_PRESETS } from '@/engine/scheduler/presets';
+import { localDayKey } from '@/engine/time';
+import { LEGACY_GENERATION } from '@/engine/revision';
 
 export class SrsDB extends Dexie {
   courses!: Table<Course, string>;
@@ -26,6 +31,9 @@ export class SrsDB extends Dexie {
   captures!: Table<Capture, string>;
   plans!: Table<CoursePlan, string>;
   proposals!: Table<Proposal, string>;
+  cardTombstones!: Table<CardTombstone, string>;
+  packetReceipts!: Table<PacketReceipt, string>;
+  dailyLessons!: Table<DailyLesson, string>;
 
   constructor(name = 'srs-app') {
     super(name);
@@ -48,6 +56,40 @@ export class SrsDB extends Dexie {
       plans: 'id, courseId',
       proposals: 'id, courseId, planId, [courseId+status], [courseId+level+status]',
     });
+    this.version(4)
+      .stores({
+        reviewLogs: 'id, cardId, itemId, courseId, ts, [courseId+ts], [sessionId+ts]',
+        cardTombstones: 'id, itemId, courseId, templateId',
+        packetReceipts: 'id, *courseIds',
+      })
+      .upgrade(async (tx) => {
+        // Old logs remain readable but cannot authorize undo. Their timestamps
+        // cannot establish which operation is still current.
+        for (const table of ['cards', 'items', 'itemTypes']) {
+          await tx.table(table).toCollection().modify({ rev: 0 });
+        }
+      });
+    this.version(5)
+      .stores({ dailyLessons: 'id, courseId' })
+      .upgrade(async (tx) => {
+        const days = new Map<string, DailyLesson>();
+        for (const log of await tx.table<ReviewLog>('reviewLogs').toArray()) {
+          if (log.kind !== 'lesson') continue;
+          const day = localDayKey(log.ts);
+          const id = `${log.courseId}:${day}`;
+          const row = days.get(id) ?? { id, courseId: log.courseId, day, itemIds: [] };
+          if (!row.itemIds.includes(log.itemId)) row.itemIds.push(log.itemId);
+          days.set(id, row);
+        }
+        await tx.table('dailyLessons').bulkAdd([...days.values()]);
+      });
+    this.version(6)
+      .stores({})
+      .upgrade(async (tx) => {
+        for (const table of ['cards', 'items', 'itemTypes', 'cardTombstones']) {
+          await tx.table(table).toCollection().modify({ generation: LEGACY_GENERATION });
+        }
+      });
   }
 }
 
@@ -62,19 +104,22 @@ export async function ensurePresets(dbi: SrsDB = db): Promise<void> {
   );
 }
 
-let persistRequested = false;
-/** Ask the browser not to evict our IndexedDB. Call once after first real write. */
-export async function requestPersistentStorage(): Promise<boolean> {
-  if (persistRequested) return true;
-  persistRequested = true;
-  try {
-    if (navigator.storage?.persist) {
-      return await navigator.storage.persist();
+let persistenceRequest: Promise<boolean> | null = null;
+/** Report actual persistence, coalescing overlapping requests and allowing retries. */
+export function requestPersistentStorage(): Promise<boolean> {
+  if (persistenceRequest) return persistenceRequest;
+  persistenceRequest = (async () => {
+    try {
+      if (typeof navigator === 'undefined' || !navigator.storage) return false;
+      if (await navigator.storage.persisted?.()) return true;
+      return navigator.storage.persist ? await navigator.storage.persist() : false;
+    } catch {
+      return false;
     }
-  } catch {
-    // ignore — treated as not persisted
-  }
-  return false;
+  })().finally(() => {
+    persistenceRequest = null;
+  });
+  return persistenceRequest;
 }
 
 export async function isStoragePersisted(): Promise<boolean | null> {

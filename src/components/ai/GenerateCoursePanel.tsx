@@ -8,6 +8,7 @@ import { aiErrorMessage } from '@/ai/client';
 import { useAiReady } from '@/hooks/useAiReady';
 import { maybeRefreshSnapshot } from '@/exchange/exchange';
 import { now } from '@/services/clock';
+import { CandidateContent } from './CandidateContent';
 
 export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
   const navigate = useNavigate();
@@ -37,7 +38,7 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
 
   if (aiReady === false) {
     return (
-      <Panel title="✨ AI course">
+      <Panel title="AI course" actions={<Button onClick={onDone}>Close</Button>}>
         <p className="text-sm text-slate-400">
           Add an API key (Anthropic or any OpenAI-compatible provider) in{' '}
           <Link to="/settings" className="text-violet-300 hover:underline">
@@ -50,10 +51,19 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <Panel title="✨ AI course" actions={<Button variant="ghost" onClick={onDone}>Close</Button>}>
+    <Panel
+      title="✨ AI course"
+      actions={
+        <Button variant="ghost" onClick={onDone}>
+          Close
+        </Button>
+      }
+    >
       {!preview && (
         <div className="space-y-3">
           <textarea
+            aria-label="What you want to learn"
+            disabled={busy}
             value={request}
             onChange={(e) => setRequest(e.target.value)}
             rows={3}
@@ -63,6 +73,8 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
           />
           <div className="flex flex-wrap items-center gap-2">
             <select
+              aria-label="Number of items"
+              disabled={busy}
               value={count}
               onChange={(e) => setCount(+e.target.value)}
               className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
@@ -74,6 +86,8 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
               ))}
             </select>
             <select
+              aria-label="Review schedule"
+              disabled={busy}
               value={preset}
               onChange={(e) => setPreset(e.target.value as typeof preset)}
               className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
@@ -84,7 +98,7 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
             </select>
             <Button
               variant="primary"
-              disabled={busy || !request.trim()}
+              disabled={busy || aiReady !== true || !request.trim()}
               onClick={() =>
                 void guarded(async () => {
                   setPreview(await generateCourse(request.trim(), count, preset));
@@ -106,9 +120,7 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
             <p className="text-sm text-slate-400">{preview.course.description}</p>
             <div className="mt-1 flex flex-wrap gap-1.5">
               <Badge color="violet">{preview.items.length} items</Badge>
-              <Badge>
-                fields: {preview.itemTypes[0]?.fields.map((f) => f.name).join(', ')}
-              </Badge>
+              <Badge>fields: {preview.itemTypes[0]?.fields.map((f) => f.name).join(', ')}</Badge>
               {preview.itemTypes[0]?.templates.map((t) => (
                 <Badge key={t.name} color="sky">
                   {t.name}: {t.promptFields.join('+')} → {t.answerField}
@@ -117,23 +129,20 @@ export function GenerateCoursePanel({ onDone }: { onDone: () => void }) {
             </div>
           </div>
           <ul className="max-h-64 space-y-1 overflow-y-auto pr-1 text-sm">
-            {preview.items.slice(0, 50).map((item, i) => (
-              <li key={i} className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-1.5">
-                <span className="text-slate-200">
-                  {Object.entries(item.fields)
-                    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
-                    .join(' · ')}
-                </span>
-                {item.note && <div className="text-xs text-violet-300/80">💡 {item.note}</div>}
+            {preview.items.map((item, i) => (
+              <li
+                key={i}
+                className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-1.5"
+              >
+                <CandidateContent item={item} />
               </li>
             ))}
-            {preview.items.length > 50 && (
-              <li className="text-xs text-slate-500">…and {preview.items.length - 50} more</li>
-            )}
           </ul>
           {error && <p className="text-sm text-rose-300">{error}</p>}
           <div className="flex gap-2">
-            <Button onClick={() => setPreview(null)}>← Discard</Button>
+            <Button disabled={busy} onClick={() => setPreview(null)}>
+              Discard
+            </Button>
             <Button
               variant="primary"
               disabled={busy}

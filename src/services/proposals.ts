@@ -1,6 +1,7 @@
 import { db } from '@/db/db';
-import { createItem } from '@/db/repo/items';
-import { dryRunProposal, resolvePacketItem } from '@/packages/importPacket';
+import { assertMediaReferences, createItem } from '@/db/repo/items';
+import { dryRunProposal, resolvePacketItem } from '@/packages/resolveContent';
+import { assertProposalKeyAvailable } from '@/db/repo/proposals';
 import type { Proposal, ProposalItem } from '@/engine/types';
 
 /**
@@ -37,10 +38,10 @@ function label(p: Proposal): string {
 export async function acceptProposals(ids: string[], now: number): Promise<AcceptResult> {
   return db.transaction(
     'rw',
-    [db.courses, db.itemTypes, db.items, db.cards, db.proposals],
+    [db.courses, db.itemTypes, db.items, db.cards, db.proposals, db.media, db.ladders],
     async () => {
       const result: AcceptResult = { accepted: [], itemIds: [], skipped: [], warnings: [] };
-      const rows = (await db.proposals.bulkGet(ids)).filter(
+      const rows = (await db.proposals.bulkGet([...new Set(ids)])).filter(
         (p): p is Proposal => !!p && p.status === 'pending',
       );
       if (rows.length === 0) return result;
@@ -56,12 +57,19 @@ export async function acceptProposals(ids: string[], now: number): Promise<Accep
       // id for what's still pending (so a same-batch dependency can wait)
       const keyToItem = new Map<string, string>();
       const pendingKeys = new Map<string, string>();
+      const ambiguousKeys = new Set<string>();
+      const deletedKeys = new Set<string>();
+      const existingIds = new Set(await db.items.where('courseId').equals(courseId).primaryKeys());
       for (const p of await db.proposals.where('courseId').equals(courseId).toArray()) {
         if (!p.item.key) continue;
-        if (p.status === 'accepted' && p.acceptedItemId) keyToItem.set(p.item.key, p.acceptedItemId);
-        else if (p.status === 'pending') pendingKeys.set(p.item.key, p.id);
+        const live = p.status === 'accepted' && p.acceptedItemId && existingIds.has(p.acceptedItemId);
+        if (live || p.status === 'pending') {
+          if (existingIds.has(p.item.key) && (!live || p.acceptedItemId !== p.item.key)) ambiguousKeys.add(p.item.key);
+          if (keyToItem.has(p.item.key) || pendingKeys.has(p.item.key)) ambiguousKeys.add(p.item.key);
+          if (live) keyToItem.set(p.item.key, p.acceptedItemId!);
+          else pendingKeys.set(p.item.key, p.id);
+        } else if (p.status === 'accepted') deletedKeys.add(p.item.key);
       }
-      const existingIds = new Set(await db.items.where('courseId').equals(courseId).primaryKeys());
       const batchIds = new Set(rows.map((r) => r.id));
 
       const skip = async (p: Proposal, reason: string) => {
@@ -79,7 +87,9 @@ export async function acceptProposals(ids: string[], now: number): Promise<Accep
         for (const p of queue) {
           let resolved: ReturnType<typeof resolvePacketItem>;
           try {
+            if (p.item.key && ambiguousKeys.has(p.item.key)) throw new Error(`Prerequisite key "${p.item.key}" is ambiguous. Rename one of the proposals.`);
             resolved = resolvePacketItem(p.item, types);
+            await assertMediaReferences(resolved.resolved.fieldValues, resolved.itemType);
           } catch (err) {
             await skip(p, (err as Error).message.replace(/^Item \d+: /, ''));
             continue;
@@ -89,6 +99,10 @@ export async function acceptProposals(ids: string[], now: number): Promise<Accep
           let waitFor: string | null = null;
           let hold: string | null = null;
           for (const ref of p.item.prereqs ?? []) {
+            if (ambiguousKeys.has(ref)) {
+              hold = `prerequisite "${ref}" is ambiguous — rename the conflicting proposals`;
+              break;
+            }
             const viaKey = keyToItem.get(ref);
             if (viaKey) {
               prereqIds.push(viaKey);
@@ -97,6 +111,9 @@ export async function acceptProposals(ids: string[], now: number): Promise<Accep
             } else if (pendingKeys.has(ref)) {
               if (batchIds.has(pendingKeys.get(ref)!)) waitFor = ref; // later in this batch
               else hold = `prerequisite "${ref}" hasn't been accepted yet — accept it first, or remove the prerequisite`;
+              break;
+            } else if (deletedKeys.has(ref)) {
+              hold = `prerequisite "${ref}" was deleted — choose a replacement or remove the prerequisite`;
               break;
             } else {
               result.warnings.push(
@@ -164,7 +181,7 @@ export async function acceptAllValid(
 ): Promise<AcceptResult> {
   const pending = await db.proposals.where('[courseId+status]').equals([courseId, 'pending']).toArray();
   const ids = pending
-    .filter((p) => p.error === null && (level === undefined || p.level === level))
+    .filter((p) => level === undefined || p.level === level)
     .sort((a, b) => a.createdAt - b.createdAt)
     .map((p) => p.id);
   return acceptProposals(ids, now);
@@ -173,7 +190,7 @@ export async function acceptAllValid(
 export async function rejectProposals(ids: string[], reason: string, now: number): Promise<number> {
   return db.transaction('rw', db.proposals, async () => {
     let n = 0;
-    for (const p of await db.proposals.bulkGet(ids)) {
+    for (const p of await db.proposals.bulkGet([...new Set(ids)])) {
       if (!p || p.status !== 'pending') continue;
       await db.proposals.put({
         ...p,
@@ -199,8 +216,9 @@ async function rechecked(p: Proposal): Promise<Proposal> {
 export async function restoreProposals(ids: string[], now: number): Promise<number> {
   return db.transaction('rw', [db.proposals, db.itemTypes, db.items], async () => {
     let n = 0;
-    for (const p of await db.proposals.bulkGet(ids)) {
+    for (const p of await db.proposals.bulkGet([...new Set(ids)])) {
       if (!p || p.status !== 'rejected') continue;
+      await assertProposalKeyAvailable(p.courseId, p.item.key, p.id);
       await db.proposals.put({
         ...(await rechecked(p)),
         status: 'pending',
@@ -228,6 +246,7 @@ export async function updateProposalItem(
     const p = await db.proposals.get(id);
     if (!p) throw new Error('proposal not found');
     if (p.status === 'accepted') throw new Error('already accepted — edit the item instead');
+    await assertProposalKeyAvailable(p.courseId, item.key, p.id);
     const next = await rechecked({ ...p, item: { ...item, level: p.level } });
     const saved: Proposal = {
       ...next,

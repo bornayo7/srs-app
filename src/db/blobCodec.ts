@@ -5,6 +5,8 @@
  */
 
 const CHUNK = 0x8000; // btoa on a huge spread would blow the argument limit
+export const MEDIA_MIME_PATTERN = /^(?:image|audio)\/[a-z0-9!#$&^_.+-]+$/;
+export const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -16,6 +18,9 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 }
 
 export function base64ToBlob(data: string, mimeType: string): Blob {
+  if (!MEDIA_MIME_PATTERN.test(mimeType))
+    throw new Error('Unsupported media type: use an image or audio attachment.');
+  if (!BASE64_PATTERN.test(data)) throw new Error('Invalid base64 media.');
   const binary = atob(data);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);

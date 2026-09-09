@@ -1,8 +1,9 @@
 import { db } from './db';
 import { blobToBase64 } from './blobCodec';
 import { downloadBlob } from '@/services/download';
+import { isLocalOnlyMetaKey } from './metaKeys';
 
-export const EXPORT_FORMAT_VERSION = 1;
+export const EXPORT_FORMAT_VERSION = 2;
 
 /**
  * Meta rows that must never leave this browser:
@@ -11,7 +12,6 @@ export const EXPORT_FORMAT_VERSION = 1;
  *   as a dead handle)
  * - AI keys are secrets; backup files get shared, keys should not.
  */
-const NON_EXPORTABLE_META_KEYS = new Set(['exchange:dirHandle', 'ai:apiKey', 'ai:openaiKey']);
 
 export interface BackupFile {
   app: 'srs-app';
@@ -29,6 +29,9 @@ export interface BackupFile {
     media?: unknown[];
     plans?: unknown[]; // P4
     proposals?: unknown[]; // P4
+    cardTombstones?: unknown[];
+    packetReceipts?: unknown[];
+    dailyLessons?: unknown[];
   };
 }
 
@@ -46,10 +49,25 @@ export interface ExportedMedia {
  * downscaled on ingest, so this stays reasonable at personal scale.
  */
 export async function exportAll(now: number): Promise<BackupFile> {
-  // encode outside the transaction: awaiting blob.arrayBuffer() inside a Dexie
-  // transaction would let it commit out from under us
+  // Capture all rows and Blob references in one snapshot; encode afterward.
+  const captured = await db.transaction('r', db.tables, async () => ({
+    courses: await db.courses.toArray(),
+    ladders: await db.ladders.toArray(),
+    itemTypes: await db.itemTypes.toArray(),
+    items: await db.items.toArray(),
+    cards: await db.cards.toArray(),
+    reviewLogs: await db.reviewLogs.toArray(),
+    meta: (await db.meta.toArray()).filter((row) => !isLocalOnlyMetaKey(row.key)),
+    captures: await db.captures.toArray(),
+    media: await db.media.toArray(),
+    plans: await db.plans.toArray(),
+    proposals: await db.proposals.toArray(),
+    cardTombstones: await db.cardTombstones.toArray(),
+    packetReceipts: await db.packetReceipts.toArray(),
+    dailyLessons: await db.dailyLessons.toArray(),
+  }));
   const media: ExportedMedia[] = await Promise.all(
-    (await db.media.toArray()).map(async (m) => ({
+    captured.media.map(async (m) => ({
       id: m.id,
       mimeType: m.mimeType,
       name: m.name,
@@ -57,39 +75,12 @@ export async function exportAll(now: number): Promise<BackupFile> {
       data: await blobToBase64(m.blob),
     })),
   );
-  return db.transaction(
-    'r',
-    [
-      db.courses,
-      db.ladders,
-      db.itemTypes,
-      db.items,
-      db.cards,
-      db.reviewLogs,
-      db.meta,
-      db.captures,
-      db.plans,
-      db.proposals,
-    ],
-    async () => ({
-      app: 'srs-app' as const,
-      formatVersion: EXPORT_FORMAT_VERSION,
-      exportedAt: now,
-      data: {
-        courses: await db.courses.toArray(),
-        ladders: await db.ladders.toArray(),
-        itemTypes: await db.itemTypes.toArray(),
-        items: await db.items.toArray(),
-        cards: await db.cards.toArray(),
-        reviewLogs: await db.reviewLogs.toArray(),
-        meta: (await db.meta.toArray()).filter((row) => !NON_EXPORTABLE_META_KEYS.has(row.key)),
-        captures: await db.captures.toArray(),
-        media,
-        plans: await db.plans.toArray(),
-        proposals: await db.proposals.toArray(),
-      },
-    }),
-  );
+  return {
+    app: 'srs-app' as const,
+    formatVersion: EXPORT_FORMAT_VERSION,
+    exportedAt: now,
+    data: { ...captured, media },
+  };
 }
 
 export function downloadBackup(backup: BackupFile): void {

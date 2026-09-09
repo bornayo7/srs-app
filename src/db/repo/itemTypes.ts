@@ -1,6 +1,8 @@
 import { db } from '../db';
 import { newId } from '@/engine/ids';
 import type { FieldDef, GradingSpec, ItemType } from '@/engine/types';
+import { assertValidItemType } from '@/engine/contentValidation';
+import { LEGACY_GENERATION } from '@/engine/revision';
 
 export interface SimpleTypeSpec {
   name: string;
@@ -12,6 +14,7 @@ export interface SimpleTypeSpec {
     name: string;
     promptFieldNames: string[];
     answerFieldName: string;
+    hintFieldNames?: string[];
     grading: GradingSpec;
   }[];
 }
@@ -22,37 +25,52 @@ export async function createItemType(
   spec: SimpleTypeSpec,
   now: number,
 ): Promise<ItemType> {
-  const fields: FieldDef[] = spec.fields.map((f) => ({ id: newId(), name: f.name, kind: f.kind }));
-  const byName = new Map(fields.map((f) => [f.name, f.id]));
+  return db.transaction('rw', [db.courses, db.itemTypes], async () => {
+    if (!(await db.courses.get(courseId))) throw new Error('course not found');
+    const fields: FieldDef[] = spec.fields.map((f) => ({
+      id: newId(),
+      name: f.name,
+      kind: f.kind,
+    }));
+    const byName = new Map(fields.map((f) => [f.name, f.id]));
 
-  const itemType: ItemType = {
-    id: newId(),
-    courseId,
-    name: spec.name,
-    color: spec.color,
-    icon: spec.icon,
-    fields,
-    templates: spec.templates.map((t) => {
-      const answerFieldId = byName.get(t.answerFieldName)!;
-      // sentence-cloze specs reference their sentences field by ANSWER name —
-      // resolve the real field id here, once ids exist
-      const grading =
-        t.grading.mode === 'sentenceCloze'
-          ? { ...t.grading, sentencesFieldId: answerFieldId }
-          : t.grading;
-      return {
-        id: newId(),
-        name: t.name,
-        promptFieldIds: t.promptFieldNames.map((n) => byName.get(n)!),
-        answerFieldId,
-        hintFieldIds: [],
-        grading,
-      };
-    }),
-    updatedAt: now,
-  };
-  await db.itemTypes.add(itemType);
-  return itemType;
+    const itemType: ItemType = {
+      id: newId(),
+      courseId,
+      name: spec.name,
+      color: spec.color,
+      icon: spec.icon,
+      fields,
+      templates: spec.templates.map((t) => {
+        const fieldId = (name: string): string => {
+          const found = byName.get(name);
+          if (!found) throw new Error(`Template "${t.name}" references unknown field "${name}"`);
+          return found;
+        };
+        const answerFieldId = fieldId(t.answerFieldName);
+        // sentence-cloze specs reference their sentences field by ANSWER name —
+        // resolve the real field id here, once ids exist
+        const grading =
+          t.grading.mode === 'sentenceCloze'
+            ? { ...t.grading, sentencesFieldId: answerFieldId }
+            : t.grading;
+        return {
+          id: newId(),
+          name: t.name,
+          promptFieldIds: t.promptFieldNames.map(fieldId),
+          answerFieldId,
+          hintFieldIds: (t.hintFieldNames ?? []).map(fieldId),
+          grading,
+        };
+      }),
+      updatedAt: now,
+      rev: 0,
+      generation: LEGACY_GENERATION,
+    };
+    assertValidItemType(itemType, await db.itemTypes.where('courseId').equals(courseId).toArray());
+    await db.itemTypes.add(itemType);
+    return itemType;
+  });
 }
 
 /** The default "Basic" front→back typed type for new courses. */

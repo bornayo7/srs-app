@@ -25,11 +25,13 @@ export function ListInput({
   onChange,
   placeholder,
   className,
+  id,
 }: {
   value: readonly string[];
   onChange: (next: string[]) => void;
   placeholder?: string;
   className?: string;
+  id?: string;
 }) {
   const [text, setText] = useState(() => value.join(', '));
   useEffect(() => {
@@ -38,6 +40,7 @@ export function ListInput({
   }, [value]);
   return (
     <TextInput
+      id={id}
       value={text}
       placeholder={placeholder}
       className={className}

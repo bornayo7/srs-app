@@ -1,22 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { useParams, useSearchParams } from 'react-router';
 import Dexie from 'dexie';
 import { db } from '@/db/db';
-import type { Card, Item, ItemType } from '@/engine/types';
-import { matchTypedAnswer } from '@/engine/grading/match';
+import type { Card } from '@/engine/types';
 import { mulberry32, seededShuffle } from '@/engine/queue';
 import { DAY } from '@/engine/time';
 import {
-  entryMatchContext,
-  withChoices,
-  withClozePick,
+  practiceFeedback,
   type Feedback,
   type SessionEntry,
-} from '@/stores/sessionStore';
-import { newChoiceCache } from '@/services/choices';
+  type QuestionProblem,
+} from '@/engine/question';
+import { prepareQuestions } from '@/services/questions';
+import { QuestionProblems } from '@/components/review/QuestionProblems';
 import { CardPrompt } from '@/components/review/CardPrompt';
 import { AnswerInput } from '@/components/review/AnswerInput';
-import { Badge, Button } from '@/components/ui';
+import { Badge, Button, ButtonLink } from '@/components/ui';
 import { now } from '@/services/clock';
 
 export type CramScope = 'learned' | 'leeches' | 'misses';
@@ -32,9 +31,7 @@ async function buildPool(courseId: string, scope: CramScope): Promise<Card[]> {
     .where('[courseId+state]')
     .between([courseId, Dexie.minKey], [courseId, Dexie.maxKey])
     .toArray();
-  const learned = all.filter(
-    (c) => !c.isGhost && (c.state === 'review' || c.state === 'burned'),
-  );
+  const learned = all.filter((c) => !c.isGhost && (c.state === 'review' || c.state === 'burned'));
   if (scope === 'learned') return learned;
   if (scope === 'leeches') return learned.filter((c) => c.stats.lapses >= 3);
   // misses: cards answered wrong in the last 7 days — a miss on a GHOST maps
@@ -46,8 +43,12 @@ async function buildPool(courseId: string, scope: CramScope): Promise<Card[]> {
     .toArray();
   const missedIds = new Set(
     logs
-      .filter((l) => l.kind === 'review' && l.outcome?.kind === 'ladder' && l.outcome.incorrectCount > 0)
-      .map((l) => (l.cardMeta?.isGhost && l.cardMeta.parentCardId ? l.cardMeta.parentCardId : l.cardId)),
+      .filter(
+        (l) => l.kind === 'review' && l.outcome?.kind === 'ladder' && l.outcome.incorrectCount > 0,
+      )
+      .map((l) =>
+        l.cardMeta?.isGhost && l.cardMeta.parentCardId ? l.cardMeta.parentCardId : l.cardId,
+      ),
   );
   return learned.filter((c) => missedIds.has(c.id));
 }
@@ -60,16 +61,18 @@ export default function CramPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const [params] = useSearchParams();
   const rawScope = params.get('scope');
-  const scope: CramScope =
-    rawScope === 'leeches' || rawScope === 'misses' ? rawScope : 'learned';
+  const scope: CramScope = rawScope === 'leeches' || rawScope === 'misses' ? rawScope : 'learned';
 
-  const [phase, setPhase] = useState<'loading' | 'empty' | 'active' | 'done'>('loading');
+  const [phase, setPhase] = useState<'loading' | 'empty' | 'active' | 'done' | 'error'>('loading');
   const [queue, setQueue] = useState<SessionEntry[]>([]);
   const [total, setTotal] = useState(0);
-  const [missCount, setMissCount] = useState(0);
+  const [misses, setMisses] = useState<Set<string>>(new Set());
+  const [problems, setProblems] = useState<QuestionProblem[]>([]);
+  const [error, setError] = useState('');
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   // a build still in flight when the course or scope changes must not show the old pool
   const loadGeneration = useRef(0);
+  const feedbackLock = useRef(false);
 
   const start = useCallback(async () => {
     if (!courseId) return;
@@ -77,57 +80,63 @@ export default function CramPage() {
     const stale = () => generation !== loadGeneration.current;
     setPhase('loading');
     setFeedback(null);
-    setMissCount(0);
-    const pool = await buildPool(courseId, scope);
-    if (stale()) return;
-    if (pool.length === 0) {
-      setPhase('empty');
-      return;
-    }
-    const items = new Map(
-      (await db.items.bulkGet([...new Set(pool.map((c) => c.itemId))]))
-        .filter((i): i is Item => !!i)
-        .map((i) => [i.id, i]),
-    );
-    const types = new Map(
-      (await db.itemTypes.bulkGet([...new Set([...items.values()].map((i) => i.typeId))]))
-        .filter((t): t is ItemType => !!t)
-        .map((t) => [t.id, t]),
-    );
-    const seed = Date.now() & 0x7fffffff;
-    const cache = newChoiceCache();
-    const entries: SessionEntry[] = [];
-    for (const card of pool) {
-      const item = items.get(card.itemId);
-      const itemType = item && types.get(item.typeId);
-      const template = itemType?.templates.find((t) => t.id === card.templateId);
-      if (item && itemType && template) {
-        const s = seed + entries.length;
-        entries.push(await withChoices(withClozePick({ card, item, itemType, template }, s), s, cache));
+    setMisses(new Set());
+    setProblems([]);
+    setError('');
+    feedbackLock.current = false;
+    try {
+      const pool = await buildPool(courseId, scope);
+      if (stale()) return;
+      if (pool.length === 0) {
+        setPhase('empty');
+        return;
+      }
+      const seed = Date.now() & 0x7fffffff;
+      const prepared = await prepareQuestions(pool, seed);
+      if (stale()) return;
+      const shuffled = seededShuffle(prepared.entries, mulberry32(seed));
+      setProblems(prepared.problems);
+      setQueue(shuffled);
+      setTotal(shuffled.length);
+      setPhase(shuffled.length === 0 ? 'empty' : 'active');
+    } catch (err) {
+      if (!stale()) {
+        setError(err instanceof Error ? err.message : 'Could not load extra study.');
+        setPhase('error');
       }
     }
-    if (stale()) return;
-    const shuffled = seededShuffle(entries, mulberry32(seed));
-    setQueue(shuffled);
-    setTotal(shuffled.length);
-    setPhase(shuffled.length === 0 ? 'empty' : 'active');
   }, [courseId, scope]);
 
   useEffect(() => {
     void start();
+    return () => {
+      loadGeneration.current++;
+    };
   }, [start]);
 
   if (phase === 'loading') {
     return <p className="py-16 text-center text-slate-500">Building cram session…</p>;
   }
+  if (phase === 'error')
+    return (
+      <div role="alert" className="py-12 text-center">
+        <p>{error}</p>
+        <Button onClick={() => void start()}>Try again</Button>
+      </div>
+    );
   if (phase === 'empty') {
     return (
       <div className="py-16 text-center">
         <div className="text-4xl">🎯</div>
-        <p className="mt-2 text-slate-300">Nothing to cram for “{SCOPE_LABEL[scope]}”.</p>
-        <Link to={`/course/${courseId}`} className="mt-4 inline-block">
-          <Button>Back to course</Button>
-        </Link>
+        <p className="mt-2 text-slate-300">
+          {problems.length
+            ? 'No available questions in this session.'
+            : `Nothing to cram for “${SCOPE_LABEL[scope]}”.`}
+        </p>
+        <QuestionProblems problems={problems} courseId={courseId!} />
+        <ButtonLink to={`/course/${courseId}`} className="mt-4">
+          Back to course
+        </ButtonLink>
       </div>
     );
   }
@@ -136,16 +145,15 @@ export default function CramPage() {
       <div className="py-16 text-center">
         <div className="text-4xl">💪</div>
         <p className="mt-2 text-slate-200">
-          Crammed {total} card{total === 1 ? '' : 's'} — {missCount} needed retries.
+          Crammed {total} card{total === 1 ? '' : 's'} — {misses.size} needed retries.
         </p>
         <p className="mt-1 text-xs text-slate-500">No SRS state was changed.</p>
+        <QuestionProblems problems={problems} courseId={courseId!} />
         <div className="mt-4 flex justify-center gap-2">
           <Button variant="primary" onClick={() => void start()}>
             Again
           </Button>
-          <Link to={`/course/${courseId}`}>
-            <Button>Done</Button>
-          </Link>
+          <ButtonLink to={`/course/${courseId}`}>Done</ButtonLink>
         </div>
       </div>
     );
@@ -157,6 +165,7 @@ export default function CramPage() {
 
   return (
     <div className="mx-auto max-w-xl">
+      <QuestionProblems problems={problems} courseId={courseId!} />
       <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
         <span>
           Cram {done} / {total} · {SCOPE_LABEL[scope]}
@@ -170,23 +179,15 @@ export default function CramPage() {
           entry={entry}
           feedback={feedback}
           onSubmit={(text) => {
-            const ctx = entryMatchContext(entry);
-            const v = matchTypedAnswer(text, ctx);
-            if (v.verdict === 'retry') {
-              setFeedback({ kind: 'retry', reason: v.reason, message: v.message, nonce: Date.now() });
-            } else if (v.verdict === 'incorrect') {
-              setMissCount((m) => m + 1);
-              setFeedback({ kind: 'incorrect', accepted: ctx.accepted });
-            } else {
-              setFeedback({
-                kind: 'correct',
-                typo: v.verdict === 'correctWithTypo',
-                toStage: null,
-                burned: false,
-              });
-            }
+            if (feedbackLock.current) return;
+            const next = practiceFeedback(entry, text);
+            feedbackLock.current = next.kind !== 'retry';
+            if (next.kind === 'incorrect') setMisses((m) => new Set([...m, entry.card.id]));
+            setFeedback(next);
           }}
           onContinue={() => {
+            if (!feedbackLock.current) return;
+            feedbackLock.current = false;
             const [current, ...rest] = queue;
             if (feedback?.kind === 'correct') {
               if (rest.length === 0) setPhase('done');

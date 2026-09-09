@@ -3,7 +3,8 @@ import { Link, useNavigate } from 'react-router';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/db/db';
 import { newId } from '@/engine/ids';
-import { Badge, Button, Panel, TextInput } from '@/components/ui';
+import { Button, ButtonLink, Panel, Status, TextInput } from '@/components/ui';
+import { useOperation } from '@/hooks/useOperation';
 import {
   useAllScheduledCards,
   useCourses,
@@ -15,8 +16,7 @@ import { useNowTick } from '@/hooks/useNowTick';
 import { buildForecast } from '@/engine/forecast';
 import { LADDER_PRESETS } from '@/engine/scheduler/presets';
 import { now } from '@/services/clock';
-import { createCourse } from '@/db/repo/courses';
-import { basicTypeSpec, createItemType } from '@/db/repo/itemTypes';
+import { createCourseWithType } from '@/services/contentCommands';
 import { installSeed, isSeedInstalled } from '@/db/seed';
 import { gentleSeed } from '@/db/seed/gentle';
 import { techSeed } from '@/db/seed/tech';
@@ -31,7 +31,7 @@ function CourseRow({ course, t }: { course: Course; t: number }) {
   const lessons = useLessonAvailability(course.id, t);
   const pendingReview = usePendingReviewCount(course.id);
   return (
-    <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3">
+    <div className="flex flex-col justify-between gap-3 border-b border-slate-800 px-1 py-5 sm:flex-row sm:items-center">
       <div className="min-w-0">
         <Link
           to={`/course/${course.id}`}
@@ -54,17 +54,19 @@ function CourseRow({ course, t }: { course: Course; t: number }) {
         )}
         <p className="truncate text-xs text-slate-500">{course.description}</p>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Link to={`/lessons/${course.id}`}>
-          <Button variant="secondary" disabled={!lessons || lessons.available === 0}>
-            Lessons{lessons && lessons.available > 0 ? ` · ${lessons.available}` : ''}
-          </Button>
-        </Link>
-        <Link to={`/review/${course.id}`}>
-          <Button variant="primary" disabled={!due}>
-            Reviews{due ? ` · ${due}` : ''}
-          </Button>
-        </Link>
+      <div className="flex flex-wrap items-center gap-2">
+        {lessons?.available ? (
+          <ButtonLink to={`/lessons/${course.id}`}>Lessons · {lessons.available}</ButtonLink>
+        ) : null}
+        {due ? (
+          <ButtonLink to={`/review/${course.id}`} variant="primary">
+            Reviews · {due}
+          </ButtonLink>
+        ) : (
+          <span className="text-sm text-slate-500">
+            {due === undefined ? 'Checking…' : 'Reviews complete for now'}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -112,6 +114,7 @@ function NewCourseForm({ onDone }: { onDone: () => void }) {
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [presetId, setPresetId] = useState('preset-classic');
+  const operation = useOperation();
   const presets = LADDER_PRESETS.filter((p) => p.id !== 'preset-ghost');
   return (
     <form
@@ -119,14 +122,19 @@ function NewCourseForm({ onDone }: { onDone: () => void }) {
       onSubmit={async (e) => {
         e.preventDefault();
         if (!name.trim()) return;
-        const t = now();
-        const course = await createCourse({ name: name.trim(), ladderPresetId: presetId }, t);
-        await createItemType(course.id, basicTypeSpec(), t);
-        onDone();
-        navigate(`/course/${course.id}`);
+        void operation.run(async () => {
+          const course = await createCourseWithType(
+            { name: name.trim(), ladderPresetId: presetId },
+            now(),
+          );
+          onDone();
+          navigate(`/course/${course.id}?view=items`);
+        });
       }}
     >
       <TextInput
+        aria-label="Course name"
+        disabled={operation.busy}
         autoFocus
         placeholder="Course name (e.g. Spanish Vocab)"
         value={name}
@@ -134,6 +142,7 @@ function NewCourseForm({ onDone }: { onDone: () => void }) {
         className="max-w-64"
       />
       <select
+        aria-label="Review schedule"
         value={presetId}
         onChange={(e) => setPresetId(e.target.value)}
         className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
@@ -144,9 +153,10 @@ function NewCourseForm({ onDone }: { onDone: () => void }) {
           </option>
         ))}
       </select>
-      <Button type="submit" variant="primary">
+      <Button type="submit" variant="primary" disabled={operation.busy || !name.trim()}>
         Create
       </Button>
+      <Status {...operation} />
       <Button type="button" variant="ghost" onClick={onDone}>
         Cancel
       </Button>
@@ -156,28 +166,37 @@ function NewCourseForm({ onDone }: { onDone: () => void }) {
 
 function QuickCapture() {
   const [text, setText] = useState('');
+  const operation = useOperation();
   const pending = useLiveQuery(() => db.captures.count(), []);
   const add = async () => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    await db.captures.add({ id: newId(), text: trimmed, createdAt: now() });
-    setText('');
+    await operation.run(async () => {
+      await db.captures.add({ id: newId(), text: trimmed, createdAt: now() });
+      setText('');
+    }, 'Note captured.');
   };
   return (
     <Panel title="Quick capture">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <TextInput
+          aria-label="Note to remember"
+          disabled={operation.busy}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void add();
             }
           }}
-          placeholder="Jot something to remember — Dr. Chen = the cardiologist from the party"
+          placeholder="A new word, a formula, a question from class…"
         />
-        <Button variant="primary" disabled={!text.trim()} onClick={() => void add()}>
+        <Button
+          variant="primary"
+          disabled={!text.trim() || operation.busy}
+          onClick={() => void add()}
+        >
           Capture
         </Button>
         {(pending ?? 0) > 0 && (
@@ -186,6 +205,7 @@ function QuickCapture() {
           </Link>
         )}
       </div>
+      <Status {...operation} />
     </Panel>
   );
 }
@@ -230,28 +250,30 @@ function SeedOffers() {
 export default function Dashboard() {
   const t = useNowTick();
   const courses = useCourses();
-  const [creating, setCreating] = useState(false);
-  const [aiCreating, setAiCreating] = useState(false);
-  const [planning, setPlanning] = useState(false);
+  const [createMode, setCreateMode] = useState<'manual' | 'ai' | 'material' | null>(null);
+  const creating = createMode === 'manual';
+  const aiCreating = createMode === 'ai';
+  const planning = createMode === 'material';
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-100">Dashboard</h1>
-        <div className="flex gap-2">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-semibold text-slate-100">Today</h1>
+          <p className="mt-1 text-sm text-slate-400">Make room for what you want to remember.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
           {!planning && (
             <Button
-              onClick={() => setPlanning(true)}
+              onClick={() => setCreateMode('material')}
               title="Paste a syllabus or notes — units drip in as you progress"
             >
-              📚 From my material
+              From my material
             </Button>
           )}
-          {!aiCreating && (
-            <Button onClick={() => setAiCreating(true)}>✨ AI course</Button>
-          )}
+          {!aiCreating && <Button onClick={() => setCreateMode('ai')}>AI course</Button>}
           {!creating && (
-            <Button variant="primary" onClick={() => setCreating(true)}>
+            <Button variant="primary" onClick={() => setCreateMode('manual')}>
               + New course
             </Button>
           )}
@@ -259,11 +281,11 @@ export default function Dashboard() {
       </div>
       {creating && (
         <Panel>
-          <NewCourseForm onDone={() => setCreating(false)} />
+          <NewCourseForm onDone={() => setCreateMode(null)} />
         </Panel>
       )}
-      {planning && <PlanCoursePanel onDone={() => setPlanning(false)} />}
-      {aiCreating && <GenerateCoursePanel onDone={() => setAiCreating(false)} />}
+      {planning && <PlanCoursePanel onDone={() => setCreateMode(null)} />}
+      {aiCreating && <GenerateCoursePanel onDone={() => setCreateMode(null)} />}
 
       {courses && courses.length === 0 && (
         <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 p-8 text-center">
@@ -276,14 +298,15 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="space-y-2">
-        {courses?.map((c) => <CourseRow key={c.id} course={c} t={t} />)}
+      <div className="space-y-2" aria-label="Your courses">
+        {courses?.map((c) => (
+          <CourseRow key={c.id} course={c} t={t} />
+        ))}
       </div>
 
       {courses && courses.length > 0 && (
         <div className="flex items-center gap-2 text-xs text-slate-500">
-          <Badge color="violet">tip</Badge>
-          Reviews unlock on the hour — check the forecast for the next wave.
+          Review availability updates automatically. Your next wave appears below.
         </div>
       )}
 

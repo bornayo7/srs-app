@@ -1,13 +1,14 @@
 import { useEffect } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { useNavigate, useParams } from 'react-router';
 import { useSession } from '@/stores/sessionStore';
 import { CardPrompt } from '@/components/review/CardPrompt';
 import { AnswerInput } from '@/components/review/AnswerInput';
 import { SessionSummary } from '@/components/review/SessionSummary';
-import { Button } from '@/components/ui';
+import { Button, ButtonLink } from '@/components/ui';
 import { useCourse, useCourseLadder } from '@/hooks/useCourseData';
 import { maybeRefreshSnapshot } from '@/exchange/exchange';
 import { now } from '@/services/clock';
+import { QuestionProblems } from '@/components/review/QuestionProblems';
 
 export default function ReviewPage() {
   const { courseId } = useParams<{ courseId: string }>();
@@ -29,6 +30,7 @@ export default function ReviewPage() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+        if (e.target instanceof HTMLInputElement && !e.target.readOnly) return;
         e.preventDefault();
         void useSession.getState().undo();
       } else if (e.key === 'Escape') {
@@ -42,15 +44,29 @@ export default function ReviewPage() {
   if (s.phase === 'idle' || s.phase === 'loading') {
     return <p className="py-16 text-center text-slate-500">Loading session…</p>;
   }
+  if (s.phase === 'error')
+    return (
+      <div role="alert" className="mx-auto max-w-xl py-12 text-center">
+        <p>{s.notice}</p>
+        <Button className="mt-4" onClick={() => courseId && void s.start(courseId)}>
+          Reload session
+        </Button>
+      </div>
+    );
 
   if (s.phase === 'empty') {
     return (
       <div className="py-16 text-center">
         <div className="text-4xl">🎉</div>
-        <p className="mt-2 text-slate-300">No reviews due right now.</p>
-        <Link to="/" className="mt-4 inline-block">
-          <Button>Back to dashboard</Button>
-        </Link>
+        <p className="mt-2 text-slate-300">
+          {s.problems.length
+            ? 'No available questions in this session.'
+            : 'No reviews due right now.'}
+        </p>
+        <QuestionProblems problems={s.problems} courseId={courseId!} />
+        <ButtonLink to="/" className="mt-4">
+          Back to dashboard
+        </ButtonLink>
       </div>
     );
   }
@@ -60,6 +76,8 @@ export default function ReviewPage() {
       <div className="mx-auto max-w-xl space-y-4">
         <h1 className="text-xl font-bold text-slate-100">Session complete</h1>
         <SessionSummary completed={s.completed} ladder={ladder ?? null} />
+        <QuestionProblems problems={s.problems} courseId={courseId!} />
+        {s.notice && <p role="status">{s.notice}</p>}
         <div className="flex justify-center gap-2">
           <Button variant="primary" onClick={() => navigate('/')}>
             Done
@@ -76,6 +94,12 @@ export default function ReviewPage() {
 
   return (
     <div className="mx-auto max-w-xl">
+      {s.notice && (
+        <p role="status" className="mb-3 text-sm text-amber-300">
+          {s.notice}
+        </p>
+      )}
+      <QuestionProblems problems={s.problems} courseId={courseId!} />
       <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
         <span>
           {done}/{s.totalCards} done{s.wrapUp && ' · wrap-up'}
@@ -103,6 +127,7 @@ export default function ReviewPage() {
           feedback={s.feedback}
           onSubmit={(text) => void s.submit(text)}
           onContinue={s.continueNext}
+          busy={s.busy}
         />
       </div>
     </div>

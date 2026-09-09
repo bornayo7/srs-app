@@ -1,4 +1,6 @@
 import JSZip from 'jszip';
+import { containsKana, normalizeAnswer } from '@/engine/grading/normalize';
+import { PACKET_FORMAT, PACKET_VERSION, parsePacket, type Packet } from '@/packages/schema';
 
 /**
  * Anki .apkg reader — legacy schema (collection.anki2 / collection.anki21,
@@ -20,6 +22,96 @@ export interface AnkiParsed {
   /** modelId → rows of cleaned field values (parallel to fieldNames). */
   notesByModel: Map<string, string[][]>;
   totalNotes: number;
+}
+
+export interface AnkiMapping {
+  include: boolean;
+  promptIdx: number;
+  answerIdx: number;
+}
+
+/** Resolve the user's note mappings once, using the same packet boundary as other imports. */
+export function buildAnkiPacket(
+  parsed: AnkiParsed,
+  mappings: Record<string, AnkiMapping>,
+  name: string,
+  cap = 2000,
+): { packet: Packet; skipped: number } {
+  if (!Number.isInteger(cap) || cap < 1 || cap > 2000)
+    throw new Error('Import between 1 and 2000 notes at a time.');
+  const included = parsed.models.filter((model) => mappings[model.id]?.include);
+  if (!included.length) throw new Error('Choose at least one note type to import.');
+  const typeNames = dedupeNames(included.map((model) => model.name));
+  const resolved = included.map((model, index) => {
+    const mapping = mappings[model.id];
+    if (
+      ![mapping.promptIdx, mapping.answerIdx].every(
+        (field) => Number.isInteger(field) && field >= 0 && field < model.fieldNames.length,
+      )
+    )
+      throw new Error(`"${model.name}": choose existing prompt and answer fields.`);
+    if (mapping.promptIdx === mapping.answerIdx)
+      throw new Error(
+        `"${model.name}": prompt and typed answer are the same field. Pick different fields or exclude this type.`,
+      );
+    const fieldNames = dedupeNames(model.fieldNames);
+    const answers = (parsed.notesByModel.get(model.id) ?? [])
+      .map((row) => row[mapping.answerIdx]?.trim() ?? '')
+      .filter((answer) => normalizeAnswer(answer));
+    const answerLang =
+      answers.length && answers.filter(containsKana).length > answers.length / 2 ? 'kana' : 'latin';
+    return {
+      model,
+      mapping,
+      fieldNames,
+      spec: {
+        name: typeNames[index],
+        icon: '🗂️',
+        fields: fieldNames.map((name) => ({ name })),
+        templates: [
+          {
+            name: 'Card',
+            promptFields: [fieldNames[mapping.promptIdx]],
+            answerField: fieldNames[mapping.answerIdx],
+            answerLang,
+          },
+        ],
+      },
+    };
+  });
+  const items: { type: string; fields: Record<string, string> }[] = [];
+  let skipped = 0;
+  outer: for (const { model, mapping, fieldNames, spec } of resolved) {
+    for (const row of parsed.notesByModel.get(model.id) ?? []) {
+      if (items.length >= cap) break outer;
+      const fields = Object.fromEntries(
+        fieldNames
+          .map((name, index) => [name, row[index]?.trim() ?? ''])
+          .filter(([, value]) => value),
+      );
+      if (
+        !fields[fieldNames[mapping.promptIdx]] ||
+        !normalizeAnswer(fields[fieldNames[mapping.answerIdx]] ?? '')
+      ) {
+        skipped++;
+        continue;
+      }
+      items.push({ type: spec.name, fields });
+    }
+  }
+  if (!items.length)
+    throw new Error('No importable notes: the selected prompt or answer fields were empty.');
+  return {
+    packet: parsePacket({
+      format: PACKET_FORMAT,
+      version: PACKET_VERSION,
+      kind: 'create-course',
+      course: { name: name.trim(), description: `Imported from Anki (${parsed.totalNotes} notes)` },
+      itemTypes: resolved.map(({ spec }) => spec),
+      items,
+    }),
+    skipped,
+  };
 }
 
 /** Anki fields are HTML — flatten to plain text for typed cards. */
@@ -103,7 +195,11 @@ export async function parseApkg(data: ArrayBuffer, fileName: string): Promise<An
     if (models.length === 0) throw new Error('This deck contains no notes.');
 
     return {
-      suggestedName: fileName.replace(/\.apkg$/i, '').replace(/[_-]+/g, ' ').trim() || 'Anki import',
+      suggestedName:
+        fileName
+          .replace(/\.apkg$/i, '')
+          .replace(/[_-]+/g, ' ')
+          .trim() || 'Anki import',
       models,
       notesByModel,
       totalNotes,
@@ -115,11 +211,13 @@ export async function parseApkg(data: ArrayBuffer, fileName: string): Promise<An
 
 /** Make names unique case-insensitively (packet validation requires it). */
 export function dedupeNames(names: string[]): string[] {
-  const seen = new Map<string, number>();
+  const seen = new Set<string>();
   return names.map((name) => {
-    const key = name.toLowerCase();
-    const n = seen.get(key) ?? 0;
-    seen.set(key, n + 1);
-    return n === 0 ? name : `${name} (${n + 1})`;
+    const base = name.trim() || 'Field';
+    let candidate = base;
+    for (let suffix = 2; seen.has(candidate.toLowerCase()); suffix++)
+      candidate = `${base} (${suffix})`;
+    seen.add(candidate.toLowerCase());
+    return candidate;
   });
 }

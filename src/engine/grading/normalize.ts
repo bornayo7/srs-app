@@ -42,5 +42,5 @@ export function containsKana(s: string): boolean {
  * switch the box into kana mode (typing romaji could never produce kanji).
  */
 export function isKanaTypeable(s: string): boolean {
-  return KANA_ONLY_RE.test(s) && !/[㐀-䶿一-鿿豈-﫿]/.test(s);
+  return KANA_ONLY_RE.test(s) && !containsLatin(s) && !/[㐀-䶿一-鿿豈-﫿]/.test(s);
 }

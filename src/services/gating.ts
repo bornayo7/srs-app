@@ -5,6 +5,7 @@ import { computeStatuses, statusChanges, type GateItem } from '@/engine/gating';
 import { studyStatus } from '@/engine/typeDesign';
 import { DEFAULT_PASS_PERCENT, levelProgress, shouldLevelUp } from '@/engine/levels';
 import { schedulerForCourse } from './schedulers';
+import { nextRevision } from '@/engine/revision';
 
 /**
  * Gating + levels against the database. Everything here runs INSIDE the
@@ -189,13 +190,14 @@ export async function recomputeUnlocks(
     for (const item of items) {
       const prereqIds = cleanedPrereqs.get(item.id) ?? [];
       // passedAt is sticky once set; otherwise derive it from the cards
-      const passedAt =
-        item.passedAt ?? ((await itemHasPassed(item.id, scheduler)) ? now : null);
-      const next = { ...item, prereqIds, passedAt };
-      if (
-        next.prereqIds.length !== item.prereqIds.length ||
-        next.passedAt !== item.passedAt
-      ) {
+      const passedAt = item.passedAt ?? ((await itemHasPassed(item.id, scheduler)) ? now : null);
+      const next = {
+        ...item,
+        prereqIds,
+        passedAt,
+        rev: prereqIds.length !== item.prereqIds.length ? nextRevision(item.rev) : item.rev,
+      };
+      if (next.prereqIds.length !== item.prereqIds.length || next.passedAt !== item.passedAt) {
         changed++;
       }
       refreshed.push(next);
@@ -230,7 +232,10 @@ export async function recomputeUnlocks(
     // lesson-vs-active is card-derived, and gating can't see cards: an item
     // sitting in the lesson queue with nothing new left to teach (or an active
     // item holding an untaught card) is repaired here too.
-    const allCards = await db.cards.where('itemId').anyOf(refreshed.map((i) => i.id)).toArray();
+    const allCards = await db.cards
+      .where('itemId')
+      .anyOf(refreshed.map((i) => i.id))
+      .toArray();
     const cardsByItem = new Map<string, Card[]>();
     for (const c of allCards) {
       if (c.isGhost) continue; // drills never define an item's lifecycle
@@ -282,7 +287,10 @@ export async function backfillGatingOnce(now: number): Promise<void> {
 export async function courseLevelProgress(courseId: string) {
   const course = await db.courses.get(courseId);
   if (!course || course.levelMode !== 'levels') return null;
-  const items = await db.items.where('[courseId+level]').equals([courseId, course.currentLevel]).toArray();
+  const items = await db.items
+    .where('[courseId+level]')
+    .equals([courseId, course.currentLevel])
+    .toArray();
   const isGate = gateTypeFilter(course);
   const gateItems = items.filter(isGate);
   return levelProgress(

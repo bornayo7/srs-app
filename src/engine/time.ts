@@ -18,6 +18,21 @@ export function startOfLocalDay(ts: number): number {
   return d.getTime();
 }
 
+export function localDayAfter(ts: number, days: number): number {
+  const d = new Date(startOfLocalDay(ts));
+  d.setDate(d.getDate() + days);
+  return d.getTime();
+}
+
+export function startOfNextLocalDay(ts: number): number {
+  return localDayAfter(ts, 1);
+}
+
+export function localDayKey(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear().toString().padStart(4, '0')}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
+}
+
 export function minutesToMs(minutes: number): number {
   return minutes * MINUTE;
 }

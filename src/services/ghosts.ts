@@ -1,4 +1,5 @@
 import { db } from '@/db/db';
+import { LEGACY_GENERATION } from '@/engine/revision';
 import { newId } from '@/engine/ids';
 import { DAY } from '@/engine/time';
 import type { Card, Course } from '@/engine/types';
@@ -41,6 +42,8 @@ export async function maybeSpawnGhost(
   const { scheduler } = await ghostScheduler();
   const init = scheduler.initialState(now);
   const ghost: Card = {
+    generation: LEGACY_GENERATION,
+    rev: 0,
     id: newId(),
     itemId: parentCard.itemId,
     courseId: parentCard.courseId,

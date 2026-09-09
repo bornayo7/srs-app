@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { extractBlank, parseClozeLines, pickClozeSentence, revealBlank, clozeSummary } from './cloze';
+import {
+  extractBlank,
+  parseClozeLines,
+  pickClozeSentence,
+  revealBlank,
+  clozeSummary,
+} from './cloze';
 import type { CardTemplate, Item } from '../types';
 
 const sentences = [
@@ -10,6 +16,8 @@ const sentences = [
 
 function makeItem(): Item {
   return {
+    generation: 'legacy',
+    rev: 0,
     id: 'i1',
     courseId: 'c1',
     typeId: 't1',

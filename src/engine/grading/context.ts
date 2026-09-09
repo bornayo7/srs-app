@@ -1,5 +1,6 @@
 import type { CardTemplate, FieldValue, Item, ItemType } from '../types';
 import type { MatchContext } from './match';
+import { richTextToPlain } from '../richtext';
 
 function asStrings(v: FieldValue | undefined): string[] {
   if (v === undefined) return [];
@@ -14,22 +15,22 @@ export function buildMatchContext(
   itemType: ItemType,
   template: CardTemplate,
 ): MatchContext {
-  const accepted = [
-    ...asStrings(item.fieldValues[template.answerFieldId]),
-    ...(item.synonyms[template.id] ?? []),
-  ];
+  const answersFor = (fieldId: string) => {
+    const answers = asStrings(item.fieldValues[fieldId]);
+    return itemType.fields.find((f) => f.id === fieldId)?.kind === 'richtext'
+      ? answers.map(richTextToPlain)
+      : answers;
+  };
+  const accepted = [...answersFor(template.answerFieldId), ...(item.synonyms[template.id] ?? [])];
 
   const siblingAccepted = itemType.templates
     .filter((t) => t.id !== template.id)
-    .flatMap((t) => [
-      ...asStrings(item.fieldValues[t.answerFieldId]),
-      ...(item.synonyms[t.id] ?? []),
-    ]);
+    .flatMap((t) => [...answersFor(t.answerFieldId), ...(item.synonyms[t.id] ?? [])]);
 
   const grading =
     template.grading.mode === 'typed'
       ? template.grading
-      : ({ mode: 'typed', answerLang: 'latin', typoTolerance: true } as const);
+      : ({ mode: 'typed', answerLang: 'any', typoTolerance: true } as const);
 
   return {
     accepted,
@@ -42,7 +43,7 @@ export function buildMatchContext(
 }
 
 /** First text-ish field value — used as the item's display name in lists. */
-export function itemPreview(item: Item, itemType: ItemType): string {
+export function itemPreview(item: Pick<Item, 'fieldValues'>, itemType: ItemType): string {
   for (const f of itemType.fields) {
     // image/audio values are media ids — showing one as a name is worse than nothing
     if (f.kind === 'image' || f.kind === 'audio') continue;

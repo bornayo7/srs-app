@@ -1,6 +1,8 @@
 import { db } from '@/db/db';
 import { parsePacket, type Packet } from '@/packages/schema';
 import { buildSnapshot } from './snapshot';
+import { applyPacket, type ImportResult } from '@/packages/importPacket';
+import { contentDigest } from '@/packages/receipts';
 
 /**
  * The exchange folder bridges the browser app and the srs-mcp server:
@@ -74,10 +76,7 @@ async function writeFile(
   await writable.close();
 }
 
-export async function writeSnapshot(
-  handle: FileSystemDirectoryHandle,
-  now: number,
-): Promise<void> {
+export async function writeSnapshot(handle: FileSystemDirectoryHandle, now: number): Promise<void> {
   const snapshot = await buildSnapshot(now);
   await writeFile(handle, 'snapshot.json', JSON.stringify(snapshot, null, 2));
 }
@@ -86,6 +85,7 @@ export interface InboxEntry {
   fileName: string;
   packet?: Packet;
   error?: string;
+  alreadyImported?: boolean;
 }
 
 /** List pending packets in inbox/ (excluding done/). */
@@ -97,7 +97,11 @@ export async function scanInbox(handle: FileSystemDirectoryHandle): Promise<Inbo
     try {
       const file = await (entry as FileSystemFileHandle).getFile();
       const packet = parsePacket(JSON.parse(await file.text()));
-      entries.push({ fileName: entry.name, packet });
+      const digest = await contentDigest(JSON.stringify(packet));
+      const receipt = await db.packetReceipts.get(
+        packet.id ? `packet:${packet.id}` : `legacy:${digest}`,
+      );
+      entries.push({ fileName: entry.name, packet, alreadyImported: receipt?.digest === digest });
     } catch (err) {
       entries.push({ fileName: entry.name, error: (err as Error).message });
     }
@@ -109,13 +113,47 @@ export async function scanInbox(handle: FileSystemDirectoryHandle): Promise<Inbo
 export async function archivePacket(
   handle: FileSystemDirectoryHandle,
   fileName: string,
+  expectedDigest?: string,
 ): Promise<void> {
   const inbox = await handle.getDirectoryHandle('inbox');
   const done = await inbox.getDirectoryHandle('done', { create: true });
   const source = await inbox.getFileHandle(fileName);
   const content = await (await source.getFile()).text();
-  await writeFile(done, fileName, content);
+  const digest = await contentDigest(JSON.stringify(parsePacket(JSON.parse(content))));
+  if (expectedDigest && digest !== expectedDigest)
+    throw new Error('The inbox file changed after import. Rescan before processing it.');
+  // Never replace a different archived delivery with the same legacy filename.
+  let destination = fileName;
+  try {
+    const archived = await done.getFileHandle(destination);
+    if ((await (await archived.getFile()).text()) !== content)
+      destination = `${digest}-${fileName}`;
+  } catch (error) {
+    if (!(error instanceof DOMException) || error.name !== 'NotFoundError') throw error;
+  }
+  await writeFile(done, destination, content);
+  if ((await (await source.getFile()).text()) !== content)
+    throw new Error('The inbox file changed while archiving. Rescan before processing it.');
   await inbox.removeEntry(fileName);
+}
+
+/** A receipt and imported rows commit together; archiving can be safely retried. */
+export async function importInboxEntry(
+  handle: FileSystemDirectoryHandle,
+  fileName: string,
+  now: number,
+): Promise<ImportResult & { archiveError?: string }> {
+  const inbox = await handle.getDirectoryHandle('inbox');
+  const source = await inbox.getFileHandle(fileName);
+  const packet = parsePacket(JSON.parse(await (await source.getFile()).text()));
+  const digest = await contentDigest(JSON.stringify(packet));
+  const result = await applyPacket(packet, now, { receiptKey: `legacy:${digest}`, digest });
+  try {
+    await archivePacket(handle, fileName, digest);
+  } catch (error) {
+    return { ...result, archiveError: error instanceof Error ? error.message : String(error) };
+  }
+  return result;
 }
 
 /**

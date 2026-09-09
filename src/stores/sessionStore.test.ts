@@ -4,9 +4,12 @@ import { createCourse } from '@/db/repo/courses';
 import { createItem } from '@/db/repo/items';
 import { basicTypeSpec, createItemType } from '@/db/repo/itemTypes';
 import { dueCards } from '@/db/repo/cards';
-import { completeLessonBatch } from '@/services/lessons';
+import { teachItems as completeLessonBatch } from '@/test/study';
 import { HOUR } from '@/engine/time';
 import { useSession } from './sessionStore';
+import { commitReview } from '@/services/commitReview';
+import { undoReview } from '@/services/undo';
+import { entryMatchContext } from '@/engine/question';
 
 // The store reads due cards through this module; the race test slows one call down.
 vi.mock('@/db/repo/cards', async (importOriginal) => {
@@ -14,6 +17,23 @@ vi.mock('@/db/repo/cards', async (importOriginal) => {
   return { ...real, dueCards: vi.fn(real.dueCards) };
 });
 const mockedDueCards = vi.mocked(dueCards);
+vi.mock('@/services/commitReview', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/services/commitReview')>();
+  return { ...real, commitReview: vi.fn(real.commitReview) };
+});
+vi.mock('@/services/undo', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/services/undo')>();
+  return { ...real, undoReview: vi.fn(real.undoReview) };
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { resolve, promise };
+}
+const answer = () => entryMatchContext(useSession.getState().queue[0]).accepted[0];
 
 const NOW = Date.UTC(2026, 0, 15, 10, 23);
 
@@ -25,7 +45,11 @@ async function courseWithDueCards(name: string, count: number): Promise<string> 
   const ids: string[] = [];
   for (let i = 0; i < count; i++) {
     const item = await createItem(
-      { courseId: course.id, typeId: type.id, fieldValues: { [front]: `${name} ${i}`, [back]: `a${i}` } },
+      {
+        courseId: course.id,
+        typeId: type.id,
+        fieldValues: { [front]: `${name} ${i}`, [back]: `a${i}` },
+      },
       NOW + i,
     );
     ids.push(item.id);
@@ -34,13 +58,11 @@ async function courseWithDueCards(name: string, count: number): Promise<string> 
   return course.id;
 }
 
-const delayed =
-  (ms: number) =>
-  async (courseId: string, t: number) => {
-    const real = mockedDueCards.getMockImplementation()!;
-    await new Promise((r) => setTimeout(r, ms));
-    return real(courseId, t);
-  };
+const delayed = (ms: number) => async (courseId: string, t: number) => {
+  const real = mockedDueCards.getMockImplementation()!;
+  await new Promise((r) => setTimeout(r, ms));
+  return real(courseId, t);
+};
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((t) => t.clear()));
@@ -92,5 +114,108 @@ describe('session start', () => {
     await pending;
     expect(useSession.getState().phase).toBe('idle');
     expect(useSession.getState().queue).toEqual([]);
+  });
+});
+
+describe('session response lifetimes', () => {
+  it('a delayed successful save cannot put feedback into a newer session', async () => {
+    const first = await courseWithDueCards('First', 1);
+    const second = await courseWithDueCards('Second', 1);
+    await useSession.getState().start(first);
+    const saved = deferred<void>();
+    const release = deferred<void>();
+    const real = vi.mocked(commitReview).getMockImplementation()!;
+    vi.mocked(commitReview).mockImplementationOnce(async (input) => {
+      const result = await real(input);
+      saved.resolve();
+      await release.promise;
+      return result;
+    });
+    const pending = useSession.getState().submit(answer());
+    await saved.promise;
+    useSession.getState().reset();
+    await useSession.getState().start(second);
+    release.resolve();
+    await pending;
+    expect(useSession.getState()).toMatchObject({
+      courseId: second,
+      feedback: null,
+      busy: false,
+      completed: [],
+    });
+    expect(
+      await db.reviewLogs
+        .where('courseId')
+        .equals(first)
+        .filter((l) => l.kind === 'review')
+        .count(),
+    ).toBe(1);
+  });
+
+  it('a delayed undo cannot resurrect its queue after reset', async () => {
+    const courseId = await courseWithDueCards('Undo', 1);
+    await useSession.getState().start(courseId);
+    await useSession.getState().submit(answer());
+    const saved = deferred<void>();
+    const release = deferred<void>();
+    const real = vi.mocked(undoReview).getMockImplementation()!;
+    vi.mocked(undoReview).mockImplementationOnce(async (logId) => {
+      const result = await real(logId);
+      saved.resolve();
+      await release.promise;
+      return result;
+    });
+    const pending = useSession.getState().undo();
+    await saved.promise;
+    useSession.getState().reset();
+    release.resolve();
+    await pending;
+    expect(useSession.getState()).toMatchObject({
+      phase: 'idle',
+      queue: [],
+      completed: [],
+      feedback: null,
+      busy: false,
+    });
+  });
+
+  it('undo restores a fresh revision that can be answered again', async () => {
+    const courseId = await courseWithDueCards('UndoAgain', 1);
+    await useSession.getState().start(courseId);
+    const initialRev = useSession.getState().queue[0].card.rev;
+    await useSession.getState().submit(answer());
+    await useSession.getState().undo();
+    expect(useSession.getState().queue[0].card.rev).toBe(initialRev + 2);
+    await useSession.getState().submit(answer());
+    expect(useSession.getState().completed).toHaveLength(1);
+    expect(useSession.getState().problems).toEqual([]);
+  });
+
+  it('a stale question is recoverable and is not counted as completed', async () => {
+    const courseId = await courseWithDueCards('Changed', 1);
+    await useSession.getState().start(courseId);
+    const entry = useSession.getState().queue[0];
+    await db.items.update(entry.item.id, { rev: entry.item.rev + 1 });
+    await useSession.getState().submit(answer());
+    expect(useSession.getState()).toMatchObject({
+      phase: 'empty',
+      completed: [],
+      totalCards: 0,
+      busy: false,
+    });
+    expect(useSession.getState().problems).toMatchObject([{ itemId: entry.item.id }]);
+  });
+
+  it('wrap-up counts the current correct answer once through the feedback transition', async () => {
+    const courseId = await courseWithDueCards('Wrap', 12);
+    await useSession.getState().start(courseId);
+    await useSession.getState().submit(answer());
+    useSession.getState().enterWrapUp();
+    const s = useSession.getState();
+    expect(s.totalCards).toBe(s.completed.length + s.queue.length - 1);
+    const total = s.totalCards;
+    useSession.getState().continueNext();
+    expect(useSession.getState().totalCards).toBe(total);
+    expect(total).toBe(useSession.getState().completed.length + useSession.getState().queue.length);
   });
 });

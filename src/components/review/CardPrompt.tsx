@@ -1,20 +1,29 @@
 import { useEffect, useState } from 'react';
-import type { SessionEntry, Feedback } from '@/stores/sessionStore';
-import type { FieldValue } from '@/engine/types';
+import type { Feedback } from '@/engine/question';
+import type { SessionEntry } from '@/engine/question';
+import type { FieldKind, FieldValue } from '@/engine/types';
 import { speak, stopSpeaking, ttsSupported } from '@/services/tts';
-import { MediaAudio, MediaImage } from '@/components/MediaImage';
+import { QuestionField } from './QuestionField';
 import { RichText } from '@/components/RichText';
 import { richTextToPlain } from '@/engine/richtext';
+import { clozeSummary, isClozeSentences } from '@/engine/grading/cloze';
 
 function fieldText(v: FieldValue | undefined): string {
   if (v === undefined) return '';
   if (typeof v === 'string') return v;
+  if (isClozeSentences(v)) return clozeSummary(v);
   if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return (v as string[]).join(', ');
   return '';
 }
 
 /** The big prompt card: type color band, template name, prompt fields or cloze. */
-export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback: Feedback | null }) {
+export function CardPrompt({
+  entry,
+  feedback,
+}: {
+  entry: SessionEntry;
+  feedback: Feedback | null;
+}) {
   const { item, itemType, template } = entry;
   const [showTranslation, setShowTranslation] = useState(false);
   const [hintsShown, setHintsShown] = useState(0);
@@ -33,12 +42,25 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
     })
     .filter((p) => p.value);
 
-  const hints = template.hintFieldIds
-    .map((id) => {
-      const field = itemType.fields.find((f) => f.id === id);
-      return { id, name: field?.name ?? '', value: fieldText(item.fieldValues[id]) };
-    })
-    .filter((h) => h.value);
+  const hints: { id: string; name: string; kind: FieldKind; value: FieldValue | undefined }[] =
+    template.hintFieldIds
+      .map((id) => {
+        const field = itemType.fields.find((f) => f.id === id);
+        return {
+          id,
+          name: field?.name ?? '',
+          kind: field?.kind ?? 'text',
+          value: item.fieldValues[id],
+        };
+      })
+      .filter((h) => fieldText(h.value));
+  if (entry.cloze?.hint)
+    hints.unshift({
+      id: 'sentence-hint',
+      name: 'Sentence hint',
+      kind: 'text',
+      value: entry.cloze.hint,
+    });
 
   // Alt+H, because the answer box has focus and a bare "h" would be typed
   useEffect(() => {
@@ -80,6 +102,7 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
             <button
               className="rounded bg-black/25 px-1.5 py-0.5 text-xs hover:bg-black/40"
               title="Read aloud"
+              aria-label="Read prompt aloud"
               onClick={() => speak(speakText)}
             >
               🔊
@@ -101,12 +124,12 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
       <div className="flex min-h-44 flex-col items-center justify-center gap-3 px-6 py-10 text-center">
         {entry.cloze ? (
           <>
-            <div className="text-2xl font-semibold leading-relaxed text-slate-50">
+            <div className="study-prompt text-2xl font-semibold leading-relaxed text-slate-50">
               {entry.cloze.masked}
             </div>
             {prompts.map((p) => (
-              <div key={p.name} className="text-sm text-slate-400">
-                {p.value}
+              <div key={p.id} className="text-sm text-slate-400">
+                <QuestionField kind={p.kind} value={item.fieldValues[p.id]} name={p.name} />
               </div>
             ))}
             {entry.cloze.translation && (
@@ -125,17 +148,14 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
             )}
           </>
         ) : (
-          prompts.map((p) =>
-            p.kind === 'image' ? (
-              <MediaImage key={p.id} id={p.value} alt={p.name} className="max-h-56" />
-            ) : p.kind === 'audio' ? (
-              <MediaAudio key={p.id} id={p.value} />
-            ) : (
-              <div key={p.id}>
-                <div className="text-3xl font-semibold leading-snug text-slate-50">{p.value}</div>
-              </div>
-            ),
-          )
+          prompts.map((p) => (
+            <div
+              key={p.id}
+              className="study-prompt text-3xl font-semibold leading-snug text-slate-50"
+            >
+              <QuestionField kind={p.kind} value={item.fieldValues[p.id]} name={p.name} />
+            </div>
+          ))
         )}
         {!entry.cloze && prompts.length === 0 && (
           <p className="text-sm text-amber-300/80">
@@ -150,12 +170,12 @@ export function CardPrompt({ entry, feedback }: { entry: SessionEntry; feedback:
         {hints.length > 0 && !graded && (
           <div className="mt-1 space-y-1">
             {hints.slice(0, hintsShown).map((h) => (
-              <p key={h.id} className="text-sm text-slate-400">
+              <div key={h.id} className="text-sm text-slate-400">
                 <span className="mr-1 text-[10px] uppercase tracking-widest text-slate-600">
                   {h.name}
                 </span>
-                {h.value}
-              </p>
+                <QuestionField kind={h.kind} value={h.value} name={h.name} />
+              </div>
             ))}
             {hintsShown < hints.length && (
               <button

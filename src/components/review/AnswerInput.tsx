@@ -1,6 +1,7 @@
 import { ChoiceInput } from './ChoiceInput';
 import { TypedInput } from './TypedInput';
-import { entryAnswerLang, type Feedback, type SessionEntry } from '@/stores/sessionStore';
+import type { Feedback } from '@/engine/question';
+import { entryAnswerLang, type SessionEntry } from '@/engine/question';
 import { MIN_CHOICE_OPTIONS } from '@/engine/grading/choice';
 
 /**
@@ -13,11 +14,13 @@ export function AnswerInput({
   feedback,
   onSubmit,
   onContinue,
+  busy = false,
 }: {
   entry: SessionEntry;
   feedback: Feedback | null;
   onSubmit: (text: string) => void;
   onContinue: () => void;
+  busy?: boolean;
 }) {
   if (entry.choices && entry.choices.length >= MIN_CHOICE_OPTIONS) {
     return (
@@ -26,6 +29,7 @@ export function AnswerInput({
         feedback={feedback}
         onSubmit={onSubmit}
         onContinue={onContinue}
+        busy={busy}
       />
     );
   }
@@ -35,6 +39,7 @@ export function AnswerInput({
       answerLang={entryAnswerLang(entry)}
       onSubmit={onSubmit}
       onContinue={onContinue}
+      busy={busy}
       placeholder={
         entry.template.grading.mode === 'choice'
           ? 'Type the answer (not enough items yet for choices)'

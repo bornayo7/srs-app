@@ -1,14 +1,18 @@
 import { db } from '@/db/db';
 import { createCourse } from '@/db/repo/courses';
 import { createItemType, type SimpleTypeSpec } from '@/db/repo/itemTypes';
-import { createItem, type CreateItemInput } from '@/db/repo/items';
+import { createItem } from '@/db/repo/items';
 import { createPlan } from '@/db/repo/plans';
-import { addProposals, findDuplicate, type ProposalDraft } from '@/db/repo/proposals';
-import { extractBlank, isClozeSentences } from '@/engine/grading/cloze';
+import { addProposals, assertHandleDoesNotShadowItem, type ProposalDraft } from '@/db/repo/proposals';
+import { resolveItem, pickType, dryRunProposal } from './resolveContent';
+export { resolvePacketItem, dryRunProposal } from './resolveContent';
 import { DEFAULT_CHOICE_COUNT } from '@/engine/grading/choice';
 import { DEFAULT_PASS_PERCENT } from '@/engine/levels';
-import type { Course, FieldValue, Item, ItemType, ProposalSource } from '@/engine/types';
-import { parseReleaseAt } from './schema';
+import type { Course, Item, ItemType, ProposalSource } from '@/engine/types';
+import { parsePacket, parseReleaseAt } from './schema';
+import { contentDigest } from './receipts';
+import { newId } from '@/engine/ids';
+import { base64ToBlob } from '@/db/blobCodec';
 import type {
   AddItemsPacket,
   CoursePlanPacket,
@@ -25,11 +29,15 @@ export interface ImportResult {
   /** Items parked in the review queue instead of the course (course-plan / propose-items). */
   proposalsAdded: number;
   warnings: string[];
+  alreadyImported?: boolean;
 }
 
 export interface ApplyOptions {
   /** Who drafted the proposals a course-plan / propose-items packet carries. Default 'mcp'. */
   source?: ProposalSource;
+  /** Stable inbox delivery identity, including for legacy packets without an id. */
+  receiptKey?: string;
+  digest?: string;
 }
 
 const TYPE_COLORS = ['#8b5cf6', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#14b8a6'];
@@ -39,91 +47,6 @@ const TYPE_COLORS = ['#8b5cf6', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#14
  * synonyms → templateId map. Throws with a precise message on any mismatch so
  * bad packets fail atomically before a single row is written.
  */
-function resolveItem(
-  item: PacketItem,
-  itemType: ItemType,
-  index: number,
-): Pick<CreateItemInput, 'fieldValues' | 'synonyms' | 'note' | 'level'> {
-  const fieldByName = new Map(itemType.fields.map((f) => [f.name.toLowerCase(), f]));
-  const fieldValues: Record<string, FieldValue> = {};
-
-  for (const [name, value] of Object.entries(item.fields)) {
-    const field = fieldByName.get(name.toLowerCase());
-    if (!field) {
-      const valid = itemType.fields.map((f) => `"${f.name}"`).join(', ');
-      throw new Error(
-        `Item ${index + 1}: unknown field "${name}" for type "${itemType.name}" (valid: ${valid})`,
-      );
-    }
-    fieldValues[field.id] = value;
-  }
-
-  for (const tpl of itemType.templates) {
-    const answer = fieldValues[tpl.answerFieldId];
-    const answerName = itemType.fields.find((f) => f.id === tpl.answerFieldId)?.name;
-    if (tpl.grading.mode === 'sentenceCloze') {
-      if (!isClozeSentences(answer) || !answer.some((s) => extractBlank(s) !== null)) {
-        throw new Error(
-          `Item ${index + 1}: "${answerName}" needs at least one sentence with a ⟦blank⟧ (template "${tpl.name}")`,
-        );
-      }
-      continue;
-    }
-    // arrays must contain actual content — [""] is not an answer
-    const present =
-      typeof answer === 'string'
-        ? answer.trim().length > 0
-        : (answer ?? []).some((v) => typeof v === 'string' && v.trim().length > 0);
-    if (!present) {
-      throw new Error(
-        `Item ${index + 1}: missing answer field "${answerName}" (needed by template "${tpl.name}")`,
-      );
-    }
-  }
-
-  const synonyms: Record<string, string[]> = {};
-  if (Array.isArray(item.synonyms)) {
-    const cleaned = item.synonyms.filter((s) => s.trim().length > 0);
-    if (cleaned.length > 0) {
-      if (itemType.templates.length > 1) {
-        // Applying loose synonyms to every template would make e.g. a meaning
-        // synonym an accepted READING answer, defeating wrong-facet grading.
-        throw new Error(
-          `Item ${index + 1}: type "${itemType.name}" has ${itemType.templates.length} templates — use the record form of synonyms ({"templateName": [...]}) instead of a plain array`,
-        );
-      }
-      synonyms[itemType.templates[0].id] = cleaned;
-    }
-  } else if (item.synonyms) {
-    const tplByName = new Map(itemType.templates.map((t) => [t.name.toLowerCase(), t]));
-    for (const [tplName, syns] of Object.entries(item.synonyms)) {
-      const tpl = tplByName.get(tplName.toLowerCase());
-      if (!tpl) {
-        throw new Error(`Item ${index + 1}: unknown template "${tplName}" in synonyms`);
-      }
-      synonyms[tpl.id] = syns;
-    }
-  }
-
-  return { fieldValues, synonyms, note: item.note ?? '', level: item.level };
-}
-
-function pickType(item: PacketItem, types: ItemType[], index: number): ItemType {
-  if (!item.type) {
-    if (types.length === 1) return types[0];
-    throw new Error(
-      `Item ${index + 1}: "type" is required — the course has ${types.length} item types`,
-    );
-  }
-  const found = types.find((t) => t.name.toLowerCase() === item.type!.toLowerCase());
-  if (!found) {
-    throw new Error(
-      `Item ${index + 1}: unknown item type "${item.type}" (valid: ${types.map((t) => t.name).join(', ')})`,
-    );
-  }
-  return found;
-}
-
 /** Packet type spec → the repo's SimpleTypeSpec (field refs resolved case-insensitively). */
 function toTypeSpec(
   typeSpec: CreateCoursePacket['itemTypes'][number],
@@ -151,12 +74,13 @@ function toTypeSpec(
       return {
         name: t.name,
         promptFieldNames: t.promptFields.map(resolve),
+        hintFieldNames: (t.hintFields ?? []).map(resolve),
         answerFieldName,
         grading:
           answerKind === 'clozeSentences'
             ? // answering INTO sentences = sentence-cloze; the field id is
               // resolved by createItemType
-              { mode: 'sentenceCloze' as const, sentencesFieldId: '', rotation: 'random' as const }
+              { mode: 'sentenceCloze' as const, sentencesFieldId: '', rotation: t.rotation ?? 'random' as const }
             : t.mode === 'choice'
               ? { mode: 'choice' as const, choices: t.choices ?? DEFAULT_CHOICE_COUNT }
               : {
@@ -193,7 +117,7 @@ async function createCourseAndTypes(
     warnings.push(`A course named "${spec.name}" already exists — imported as "${name}".`);
   }
 
-  const course = await createCourse(
+  const createdCourse = await createCourse(
     {
       name,
       description: spec.description,
@@ -203,6 +127,8 @@ async function createCourseAndTypes(
     },
     now,
   );
+  const course = { ...createdCourse, ghosts: spec.ghosts ?? createdCourse.ghosts, answerStyle: spec.answerStyle ?? createdCourse.answerStyle };
+  await db.courses.put(course);
 
   const types: ItemType[] = [];
   for (const [i, typeSpec] of typeSpecs.entries()) {
@@ -234,19 +160,46 @@ async function createCourseAndTypes(
 async function applyCreateCourse(packet: CreateCoursePacket, now: number): Promise<ImportResult> {
   return db.transaction(
     'rw',
-    [db.courses, db.ladders, db.itemTypes, db.items, db.cards],
+    [db.courses, db.ladders, db.itemTypes, db.items, db.cards, db.media, db.plans],
     async () => {
       const { course, types, warnings } = await createCourseAndTypes(
         packet.course,
         packet.itemTypes,
         now,
+        packet.plan ? { levelMode: 'levels', autoAdvance: packet.plan.releaseMode === 'progress' } : {},
       );
+
+      if (packet.ladder && course.scheduling.kind === 'ladder') {
+        await db.ladders.put({ ...packet.ladder, id: course.scheduling.ladderId, courseId: course.id, isPreset: false, stages: packet.ladder.stages.map((stage) => ({ ...stage, id: newId() })), updatedAt: now });
+      }
+      const mediaIds = new Map<string, string>();
+      for (const asset of packet.media ?? []) {
+        const id = newId();
+        const blob = base64ToBlob(asset.data, asset.mimeType);
+        await db.media.add({ id, blob, mimeType: asset.mimeType, name: asset.name, createdAt: now });
+        mediaIds.set(asset.key, id);
+      }
+      if (packet.plan) {
+        await createPlan({ courseId: course.id, ...packet.plan, units: packet.plan.units.map((unit) => ({ title: unit.title, summary: unit.summary ?? '', topics: unit.topics ?? [], targetCount: unit.targetCount ?? 10, ...(unit.releaseAt !== undefined ? { releaseAt: parseReleaseAt(unit.releaseAt)! } : {}) })) }, now);
+      } else if (course.levelMode === 'levels' && course.levelConfig?.autoAdvance === false) {
+        await db.courses.update(course.id, { levelConfig: { ...course.levelConfig, autoAdvance: true } });
+        warnings.push('This legacy package has no release plan. The imported course will advance through study progress.');
+      }
 
       let stamp = now;
       const idByKey = new Map<string, string>();
       for (const [i, item] of packet.items.entries()) {
         const itemType = pickType(item, types, i);
         const resolved = resolveItem(item, itemType, i);
+        for (const field of itemType.fields) {
+          if (field.kind !== 'image' && field.kind !== 'audio') continue;
+          const key = resolved.fieldValues[field.id];
+          if (typeof key === 'string' && key) {
+            const id = mediaIds.get(key);
+            if (!id) throw new Error(`Item ${i + 1}: missing packaged media "${key}".`);
+            resolved.fieldValues[field.id] = id;
+          }
+        }
         const created = await createItem(
           {
             courseId: course.id,
@@ -276,8 +229,10 @@ async function resolveTargetCourse(ref: {
   courseName?: string;
 }): Promise<Course> {
   let course: Course | undefined;
-  if (ref.courseId) course = await db.courses.get(ref.courseId);
-  if (!course && ref.courseName) {
+  if (ref.courseId) {
+    course = await db.courses.get(ref.courseId);
+    if (!course) throw new Error(`Course not found (${ref.courseId}). This packet targets a deleted or unavailable course.`);
+  } else if (ref.courseName) {
     const all = await db.courses.toArray();
     const matches = all.filter((c) => c.name.toLowerCase() === ref.courseName!.toLowerCase());
     if (matches.length > 1) {
@@ -296,7 +251,7 @@ async function resolveTargetCourse(ref: {
 }
 
 async function applyAddItems(packet: AddItemsPacket, now: number): Promise<ImportResult> {
-  return db.transaction('rw', [db.courses, db.itemTypes, db.items, db.cards], async () => {
+  return db.transaction('rw', [db.courses, db.itemTypes, db.items, db.cards, db.media], async () => {
     const course = await resolveTargetCourse(packet);
     const types = await db.itemTypes.where('courseId').equals(course.id).toArray();
     if (types.length === 0) throw new Error(`Course "${course.name}" has no item types`);
@@ -308,6 +263,7 @@ async function applyAddItems(packet: AddItemsPacket, now: number): Promise<Impor
     let stamp = now;
     const idByKey = new Map<string, string>();
     for (const [i, item] of packet.items.entries()) {
+      await assertHandleDoesNotShadowItem(course.id, item.key);
       const itemType = pickType(item, types, i);
       const resolved = resolveItem(item, itemType, i);
       const prereqIds = (item.prereqs ?? []).map((ref) => {
@@ -334,33 +290,6 @@ async function applyAddItems(packet: AddItemsPacket, now: number): Promise<Impor
       warnings: [],
     };
   });
-}
-
-/** Resolve one packet item against a course's types — throws with a precise message. */
-export function resolvePacketItem(
-  item: PacketItem,
-  types: ItemType[],
-  index = 0,
-): { itemType: ItemType; resolved: Pick<CreateItemInput, 'fieldValues' | 'synonyms' | 'note' | 'level'> } {
-  const itemType = pickType(item, types, index);
-  return { itemType, resolved: resolveItem(item, itemType, index) };
-}
-
-/**
- * The review queue's per-row checks: a validation error (without the batch
- * index prefix — rows are reviewed one at a time) and a duplicate flag.
- */
-export function dryRunProposal(
-  item: PacketItem,
-  types: ItemType[],
-  existing: readonly Item[],
-): { error: string | null; duplicateOf: string | null } {
-  try {
-    const { itemType } = resolvePacketItem(item, types);
-    return { error: null, duplicateOf: findDuplicate(item, itemType, existing) };
-  } catch (err) {
-    return { error: (err as Error).message.replace(/^Item \d+: /, ''), duplicateOf: null };
-  }
 }
 
 /**
@@ -403,7 +332,7 @@ async function applyCoursePlan(
         {
           levelMode: 'levels',
           // progress mode lets the level engine advance; the other two own the level
-          autoAdvance: packet.course.autoAdvance ?? releaseMode === 'progress',
+          autoAdvance: releaseMode === 'progress',
         },
       );
 
@@ -412,6 +341,7 @@ async function applyCoursePlan(
           courseId: course.id,
           title: course.name,
           material: packet.material ?? '',
+          materialTruncated: packet.materialTruncated,
           releaseMode,
           units: packet.units.map((u) => {
             const releaseAt = parseReleaseAt(u.releaseAt);
@@ -501,11 +431,30 @@ async function applyProposeItems(
 
 /** Apply a validated packet to the database — atomic: any error rolls back everything. */
 export async function applyPacket(
-  packet: Packet,
+  input: Packet,
   now: number,
   opts: ApplyOptions = {},
 ): Promise<ImportResult> {
-  const source = opts.source ?? 'mcp';
+  const packet = parsePacket(input);
+  const receiptId = packet.id ? `packet:${packet.id}` : opts.receiptKey;
+  const digest = receiptId ? opts.digest ?? await contentDigest(JSON.stringify(packet)) : '';
+  return db.transaction('rw', [db.courses, db.itemTypes, db.items, db.cards, db.ladders, db.media, db.plans, db.proposals, db.packetReceipts], async () => {
+    if (receiptId) {
+      const receipt = await db.packetReceipts.get(receiptId);
+      if (receipt) {
+        if (receipt.digest !== digest) throw new Error('This packet id was already used for different content. Give the new packet a new id.');
+        const courseId = receipt.courseIds[0];
+        const course = await db.courses.get(courseId);
+        return { courseId, courseName: course?.name ?? 'Previously imported course', itemsAdded: 0, proposalsAdded: 0, warnings: [], alreadyImported: true };
+      }
+    }
+    const result = await dispatchPacket(packet, now, opts.source ?? 'mcp');
+    if (receiptId) await db.packetReceipts.add({ id: receiptId, digest, importedAt: now, courseIds: [result.courseId] });
+    return result;
+  });
+}
+
+async function dispatchPacket(packet: Packet, now: number, source: ProposalSource): Promise<ImportResult> {
   switch (packet.kind) {
     case 'create-course':
       return applyCreateCourse(packet, now);
