@@ -82,6 +82,37 @@ describe('study input events', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it('held Enter or Space changes the grade only once', async () => {
+    const user = userEvent.setup();
+    const next = vi.fn();
+    render(<ChoiceAnswer onContinue={next} />);
+    await user.click(screen.getByRole('button', { name: /dog/ }));
+    screen.getByRole('button', { name: 'Mark correct' }).focus();
+    await user.keyboard('{Enter>4/}');
+    expect(screen.getByRole('status').textContent).toBe('Marked correct');
+    const override = screen.getByRole('button', { name: 'Mark wrong' });
+    expect(fireEvent.keyDown(override, { key: ' ', repeat: true })).toBe(false);
+    await user.keyboard('[Space>4/]');
+    expect(screen.getByRole('status').textContent).toBe('Marked wrong');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it.each(['typed', 'choice'])('held Enter on %s Continue advances only once', async (mode) => {
+    const user = userEvent.setup();
+    const next = vi.fn();
+    render(
+      <AnswerInput
+        entry={mode === 'choice' ? choiceEntry : { ...choiceEntry, choices: undefined }}
+        feedback={overrideFeedback(choiceEntry, true)}
+        onSubmit={vi.fn()}
+        onContinue={next}
+      />,
+    );
+    screen.getByRole('button', { name: 'Continue (Enter)' }).focus();
+    await user.keyboard('{Enter>4/}');
+    expect(next).toHaveBeenCalledOnce();
+  });
+
   it('Enter still continues after selecting a now-disabled choice', async () => {
     const user = userEvent.setup();
     const next = vi.fn();

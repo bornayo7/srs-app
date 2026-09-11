@@ -49,7 +49,18 @@ export function AnswerInput({
       />
     );
   return (
-    <div>
+    <div
+      onKeyDown={(e) => {
+        // Held activation keys must not repeatedly override a grade or Continue.
+        if (
+          e.repeat &&
+          (e.key === 'Enter' || e.key === ' ') &&
+          e.target instanceof Element &&
+          e.target.closest('button')
+        )
+          e.preventDefault();
+      }}
+    >
       {graded && onOverride && (
         <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-slate-700 px-4 py-3">
           <p
