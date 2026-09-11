@@ -14,16 +14,19 @@ export function AnswerInput({
   feedback,
   onSubmit,
   onContinue,
+  onOverride,
   busy = false,
 }: {
   entry: SessionEntry;
   feedback: Feedback | null;
   onSubmit: (text: string) => void;
   onContinue: () => void;
+  onOverride?: (correct: boolean) => void;
   busy?: boolean;
 }) {
-  if (entry.choices && entry.choices.length >= MIN_CHOICE_OPTIONS) {
-    return (
+  const graded = feedback?.kind === 'correct' || feedback?.kind === 'incorrect';
+  const input =
+    entry.choices && entry.choices.length >= MIN_CHOICE_OPTIONS ? (
       <ChoiceInput
         options={entry.choices}
         feedback={feedback}
@@ -31,20 +34,41 @@ export function AnswerInput({
         onContinue={onContinue}
         busy={busy}
       />
+    ) : (
+      <TypedInput
+        feedback={feedback}
+        answerLang={entryAnswerLang(entry)}
+        onSubmit={onSubmit}
+        onContinue={onContinue}
+        busy={busy}
+        placeholder={
+          entry.template.grading.mode === 'choice'
+            ? 'Type the answer (not enough items yet for choices)'
+            : undefined
+        }
+      />
     );
-  }
   return (
-    <TypedInput
-      feedback={feedback}
-      answerLang={entryAnswerLang(entry)}
-      onSubmit={onSubmit}
-      onContinue={onContinue}
-      busy={busy}
-      placeholder={
-        entry.template.grading.mode === 'choice'
-          ? 'Type the answer (not enough items yet for choices)'
-          : undefined
-      }
-    />
+    <div>
+      {graded && onOverride && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-slate-700 px-4 py-3">
+          <p
+            role="status"
+            className={`text-sm font-semibold ${feedback.kind === 'correct' ? 'text-emerald-300' : 'text-rose-300'}`}
+          >
+            {feedback.kind === 'correct' ? 'Marked correct' : 'Marked wrong'}
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onOverride(feedback.kind !== 'correct')}
+            className="rounded-lg border border-slate-600 px-3 py-2 text-sm text-slate-200 hover:border-violet-400 disabled:opacity-50"
+          >
+            {feedback.kind === 'correct' ? 'Mark wrong' : 'Mark correct'}
+          </button>
+        </div>
+      )}
+      {input}
+    </div>
   );
 }

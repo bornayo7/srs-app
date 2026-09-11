@@ -138,6 +138,15 @@ export function TypedInput({
           Saving answer…
         </p>
       )}
+      {graded && (
+        <button
+          type="submit"
+          disabled={busy}
+          className="mt-3 w-full rounded-xl border-2 border-slate-700 bg-slate-900 py-2 text-sm text-slate-300 hover:border-violet-500"
+        >
+          Continue (Enter)
+        </button>
+      )}
       <p className="mt-2 text-center text-xs text-slate-500">
         {graded ? 'Enter → next' : 'Enter → submit'}
       </p>

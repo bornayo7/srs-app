@@ -4,6 +4,7 @@ import { db, requestPersistentStorage } from '@/db/db';
 import type { Item, ItemType } from '@/engine/types';
 import { clozeSummary, isClozeSentences } from '@/engine/grading/cloze';
 import {
+  overrideFeedback,
   practiceFeedback,
   type Feedback,
   type QuestionProblem,
@@ -327,6 +328,10 @@ export default function LessonPage() {
           entry={entry}
           feedback={feedback}
           busy={busy}
+          onOverride={(correct) => {
+            if (saving.current || !feedbackLock.current) return;
+            setFeedback(overrideFeedback(entry, correct));
+          }}
           onSubmit={(text) => {
             if (feedbackLock.current || saving.current) return;
             const next = practiceFeedback(entry, text);

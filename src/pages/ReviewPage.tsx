@@ -126,7 +126,8 @@ export default function ReviewPage() {
           entry={entry}
           feedback={s.feedback}
           onSubmit={(text) => void s.submit(text)}
-          onContinue={s.continueNext}
+          onContinue={() => void s.continueNext()}
+          onOverride={s.overrideAnswer}
           busy={s.busy}
         />
       </div>

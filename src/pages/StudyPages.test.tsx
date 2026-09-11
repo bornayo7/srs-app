@@ -79,6 +79,63 @@ afterEach(() => {
 });
 
 describe('study-page continuations', () => {
+  it('lesson overrides control retries and keep activation provisional until Continue', async () => {
+    const { course } = await seed('Override lesson');
+    render(
+      <MemoryRouter initialEntries={[`/lesson/${course.id}`]}>
+        <Routes>
+          <Route path="/lesson/:courseId" element={<LessonPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Override lesson prompt 0');
+    fireEvent.click(screen.getByRole('button', { name: 'Quiz the batch' }));
+    submit('answer0');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark wrong' }));
+    expect(screen.getByText('Marked wrong')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue (Enter)' }));
+    expect((screen.getByRole('textbox') as HTMLInputElement).readOnly).toBe(false);
+    expect(await db.reviewLogs.count()).toBe(0);
+    expect((await db.cards.toArray())[0].state).toBe('new');
+    submit('another phrasing');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark correct' }));
+    expect(await db.reviewLogs.count()).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Continue (Enter)' }));
+    await screen.findByText('Batch complete');
+    expect(await db.reviewLogs.count()).toBe(1);
+    expect((await db.cards.toArray())[0].state).toBe('review');
+  });
+
+  it('cram only counts the final confirmed grade and never changes scheduling', async () => {
+    const { course, items } = await seed('Override cram');
+    await teachItems([items[0].id], 'lesson', NOW);
+    const before = await db.cards.toArray();
+    const logs = await db.reviewLogs.toArray();
+    render(
+      <MemoryRouter initialEntries={[`/cram/${course.id}`]}>
+        <Routes>
+          <Route path="/cram/:courseId" element={<CramPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Override cram prompt 0');
+    submit('another phrasing');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark correct' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue (Enter)' }));
+    expect(screen.getByText(/Crammed 1 card — 0 needed retries/)).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Again' }));
+    await screen.findByText('Override cram prompt 0');
+    submit('answer0');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark wrong' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue (Enter)' }));
+    submit('another phrasing');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark correct' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue (Enter)' }));
+    expect(screen.getByText(/Crammed 1 card — 1 needed retries/)).toBeDefined();
+    expect(await db.cards.toArray()).toEqual(before);
+    expect(await db.reviewLogs.toArray()).toEqual(logs);
+  });
+
   it('late lesson loading cannot replace the newly selected course', async () => {
     const a = await seed('Old');
     const b = await seed('New');
@@ -126,6 +183,7 @@ describe('study-page continuations', () => {
     next();
     await saved.promise;
     expect(await db.reviewLogs.count()).toBe(1);
+    expect((screen.getByRole('button', { name: 'Mark wrong' }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => {
       release.resolve();
       await release.promise;

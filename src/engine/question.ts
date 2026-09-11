@@ -27,6 +27,13 @@ export type Feedback =
   | { kind: 'incorrect'; accepted: string[] }
   | { kind: 'retry'; reason: string; message?: string; nonce: number };
 
+/** A learner's explicit grade stays provisional until they continue. */
+export function overrideFeedback(entry: SessionEntry, correct: boolean): Feedback {
+  return correct
+    ? { kind: 'correct', typo: false, toStage: null, burned: false }
+    : { kind: 'incorrect', accepted: entryMatchContext(entry).accepted };
+}
+
 /** Practice gets the same verdicts as review, without a persistence outcome. */
 export function practiceFeedback(entry: SessionEntry, response: string): Feedback {
   const result = gradeQuestion(entry, response);

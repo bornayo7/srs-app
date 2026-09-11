@@ -65,12 +65,168 @@ const delayed = (ms: number) => async (courseId: string, t: number) => {
 };
 
 beforeEach(async () => {
+  vi.restoreAllMocks();
+  const [reviews, undo] = await Promise.all([
+    vi.importActual<typeof import('@/services/commitReview')>('@/services/commitReview'),
+    vi.importActual<typeof import('@/services/undo')>('@/services/undo'),
+  ]);
+  vi.mocked(commitReview).mockReset().mockImplementation(reviews.commitReview);
+  vi.mocked(undoReview).mockReset().mockImplementation(undo.undoReview);
   await Promise.all(db.tables.map((t) => t.clear()));
   await ensurePresets();
   useSession.getState().reset();
   mockedDueCards.mockClear();
   // every card was scheduled for NOW+4h; the store asks the clock, so move the clock
   vi.spyOn(Date, 'now').mockReturnValue(NOW + 5 * HOUR);
+});
+
+describe('answer overrides', () => {
+  it('a wrong answer can become correct without a lapse, even after repeated toggles', async () => {
+    const courseId = await courseWithDueCards('OverrideCorrect', 1);
+    await useSession.getState().start(courseId);
+    const entry = useSession.getState().queue[0];
+    const original = await db.cards.get(entry.card.id);
+    await useSession.getState().submit('wrong');
+    useSession.getState().overrideAnswer(true);
+    useSession.getState().overrideAnswer(false);
+    useSession.getState().overrideAnswer(true);
+    expect(useSession.getState()).toMatchObject({
+      feedback: { kind: 'correct', typo: false },
+      completed: [],
+      incorrectCounts: {},
+    });
+    expect(await db.cards.get(entry.card.id)).toEqual(original);
+    expect(await db.reviewLogs.filter((log) => log.kind === 'review').count()).toBe(0);
+    await useSession.getState().continueNext();
+    expect(await db.cards.get(entry.card.id)).toMatchObject({
+      stats: { reviews: 1, correct: 1, lapses: 0 },
+    });
+    expect(useSession.getState()).toMatchObject({ phase: 'summary', queue: [] });
+    expect(useSession.getState().completed).toHaveLength(1);
+    expect(vi.mocked(commitReview)).toHaveBeenCalledOnce();
+  });
+
+  it('correct-to-wrong does not prematurely pass the item, unlock dependents or advance levels', async () => {
+    const courseId = await courseWithDueCards('OverrideWrong', 1);
+    await db.courses.update(courseId, { levelMode: 'levels' });
+    const card = (await db.cards.where('courseId').equals(courseId).first())!;
+    const item = (await db.items.get(card.itemId))!;
+    const type = (await db.itemTypes.get(item.typeId))!;
+    await db.cards.update(card.id, { srs: { kind: 'ladder', stageIndex: 3 } });
+    const dependent = await createItem(
+      {
+        courseId,
+        typeId: type.id,
+        fieldValues: { [type.fields[0].id]: 'Dependent', [type.fields[1].id]: 'next' },
+        level: 2,
+        prereqIds: [item.id],
+      },
+      NOW,
+    );
+    await useSession.getState().start(courseId);
+    await useSession.getState().submit(answer());
+    useSession.getState().overrideAnswer(false);
+    expect((await db.items.get(item.id))!.passedAt).toBeNull();
+    expect((await db.items.get(dependent.id))!.status).toBe('locked');
+    expect((await db.courses.get(courseId))!.currentLevel).toBe(1);
+    await useSession.getState().continueNext();
+    expect(useSession.getState().incorrectCounts[card.id]).toBe(1);
+    await useSession.getState().submit(answer());
+    await useSession.getState().continueNext();
+    expect(await db.cards.get(card.id)).toMatchObject({
+      stats: { reviews: 1, correct: 0, lapses: 1 },
+      srs: { stageIndex: 2 },
+    });
+    expect((await db.items.get(item.id))!.passedAt).toBeNull();
+    expect((await db.items.get(dependent.id))!.status).toBe('locked');
+    expect((await db.courses.get(courseId))!.currentLevel).toBe(1);
+  });
+
+  it('overriding a later attempt keeps earlier confirmed mistakes', async () => {
+    const courseId = await courseWithDueCards('EarlierMistake', 1);
+    await useSession.getState().start(courseId);
+    const { card } = useSession.getState().queue[0];
+    await useSession.getState().submit('wrong');
+    await useSession.getState().continueNext();
+    await useSession.getState().submit('still wrong');
+    useSession.getState().overrideAnswer(true);
+    await useSession.getState().continueNext();
+    expect(useSession.getState().completed[0].incorrectCount).toBe(1);
+    expect(await db.cards.get(card.id)).toMatchObject({
+      stats: { reviews: 1, correct: 0, lapses: 1 },
+    });
+  });
+
+  it.each([true, false])(
+    'undo cancels a provisional %s result without erasing earlier mistakes',
+    async (correct) => {
+      const courseId = await courseWithDueCards('PendingUndo', 1);
+      await useSession.getState().start(courseId);
+      const { card } = useSession.getState().queue[0];
+      await useSession.getState().submit('wrong');
+      await useSession.getState().continueNext();
+      await useSession.getState().submit(correct ? answer() : 'wrong again');
+      await useSession.getState().undo();
+      expect(useSession.getState()).toMatchObject({ feedback: null, completed: [] });
+      expect(useSession.getState().incorrectCounts[card.id]).toBe(1);
+      expect(await db.cards.get(card.id)).toEqual(card);
+      expect(vi.mocked(undoReview)).not.toHaveBeenCalled();
+    },
+  );
+
+  it('repeated Continue and override while saving cannot change or duplicate the accepted outcome', async () => {
+    const courseId = await courseWithDueCards('BusyOverride', 1);
+    await useSession.getState().start(courseId);
+    await useSession.getState().submit('wrong');
+    useSession.getState().overrideAnswer(true);
+    const release = deferred<void>();
+    const real = vi.mocked(commitReview).getMockImplementation()!;
+    vi.mocked(commitReview).mockImplementationOnce(async (input) => {
+      await release.promise;
+      return real(input);
+    });
+    const pending = useSession.getState().continueNext();
+    await useSession.getState().continueNext();
+    useSession.getState().overrideAnswer(false);
+    await useSession.getState().undo();
+    expect(useSession.getState()).toMatchObject({ busy: true, feedback: { kind: 'correct' } });
+    release.resolve();
+    await pending;
+    expect(vi.mocked(commitReview)).toHaveBeenCalledOnce();
+    expect(useSession.getState().completed).toHaveLength(1);
+    expect(useSession.getState().completed[0].incorrectCount).toBe(0);
+    expect(await db.reviewLogs.filter((log) => log.kind === 'review').count()).toBe(1);
+  });
+
+  it('a failed save keeps the chosen override and retries without re-grading it', async () => {
+    const courseId = await courseWithDueCards('RetryOverride', 1);
+    await useSession.getState().start(courseId);
+    await useSession.getState().submit('wrong');
+    useSession.getState().overrideAnswer(true);
+    vi.mocked(commitReview).mockRejectedValueOnce(new Error('Storage unavailable'));
+    await useSession.getState().continueNext();
+    expect(useSession.getState()).toMatchObject({
+      phase: 'active',
+      feedback: { kind: 'correct' },
+      busy: false,
+      completed: [],
+      notice: expect.stringMatching(/Continue again to retry/),
+    });
+    await useSession.getState().continueNext();
+    expect(useSession.getState()).toMatchObject({ phase: 'summary', notice: null });
+    expect(useSession.getState().completed[0].incorrectCount).toBe(0);
+    expect(await db.reviewLogs.filter((log) => log.kind === 'review').count()).toBe(1);
+  });
+
+  it('leaving an unconfirmed answer preserves the due card without a review', async () => {
+    const courseId = await courseWithDueCards('Unconfirmed', 1);
+    await useSession.getState().start(courseId);
+    const { card } = useSession.getState().queue[0];
+    await useSession.getState().submit(answer());
+    useSession.getState().reset();
+    expect(await db.cards.get(card.id)).toEqual(card);
+    expect(await db.reviewLogs.filter((log) => log.kind === 'review').count()).toBe(0);
+  });
 });
 
 describe('session start', () => {
@@ -131,7 +287,8 @@ describe('session response lifetimes', () => {
       await release.promise;
       return result;
     });
-    const pending = useSession.getState().submit(answer());
+    await useSession.getState().submit(answer());
+    const pending = useSession.getState().continueNext();
     await saved.promise;
     useSession.getState().reset();
     await useSession.getState().start(second);
@@ -156,6 +313,7 @@ describe('session response lifetimes', () => {
     const courseId = await courseWithDueCards('Undo', 1);
     await useSession.getState().start(courseId);
     await useSession.getState().submit(answer());
+    await useSession.getState().continueNext();
     const saved = deferred<void>();
     const release = deferred<void>();
     const real = vi.mocked(undoReview).getMockImplementation()!;
@@ -184,9 +342,11 @@ describe('session response lifetimes', () => {
     await useSession.getState().start(courseId);
     const initialRev = useSession.getState().queue[0].card.rev;
     await useSession.getState().submit(answer());
+    await useSession.getState().continueNext();
     await useSession.getState().undo();
     expect(useSession.getState().queue[0].card.rev).toBe(initialRev + 2);
     await useSession.getState().submit(answer());
+    await useSession.getState().continueNext();
     expect(useSession.getState().completed).toHaveLength(1);
     expect(useSession.getState().problems).toEqual([]);
   });
@@ -197,6 +357,7 @@ describe('session response lifetimes', () => {
     const entry = useSession.getState().queue[0];
     await db.items.update(entry.item.id, { rev: entry.item.rev + 1 });
     await useSession.getState().submit(answer());
+    await useSession.getState().continueNext();
     expect(useSession.getState()).toMatchObject({
       phase: 'empty',
       completed: [],
@@ -212,9 +373,9 @@ describe('session response lifetimes', () => {
     await useSession.getState().submit(answer());
     useSession.getState().enterWrapUp();
     const s = useSession.getState();
-    expect(s.totalCards).toBe(s.completed.length + s.queue.length - 1);
+    expect(s.totalCards).toBe(s.completed.length + s.queue.length);
     const total = s.totalCards;
-    useSession.getState().continueNext();
+    await useSession.getState().continueNext();
     expect(useSession.getState().totalCards).toBe(total);
     expect(total).toBe(useSession.getState().completed.length + useSession.getState().queue.length);
   });

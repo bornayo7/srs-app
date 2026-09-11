@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import {
-  entryMatchContext,
-  gradeQuestion,
+  overrideFeedback,
+  practiceFeedback,
   type Feedback,
   type QuestionProblem,
   type SessionEntry,
@@ -45,7 +45,8 @@ interface SessionState {
 
   start: (courseId: string) => Promise<void>;
   submit: (input: string) => Promise<void>;
-  continueNext: () => void;
+  overrideAnswer: (correct: boolean) => void;
+  continueNext: () => Promise<void>;
   undo: () => Promise<void>;
   enterWrapUp: () => void;
   reset: () => void;
@@ -147,37 +148,54 @@ export const useSession = create<SessionState>((set, get) => ({
       return;
     }
 
-    const ctx = entryMatchContext(entry);
-    const verdict = gradeQuestion(entry, input);
+    // The displayed result stays provisional until Continue. In particular, a
+    // correct answer must not pass an item or unlock lessons before an override.
+    set({ feedback: practiceFeedback(entry, input), notice: null });
+  },
 
-    if (verdict.verdict === 'retry') {
-      set({
-        feedback: {
-          kind: 'retry',
-          reason: verdict.reason,
-          message: verdict.message,
-          nonce: Date.now(),
-        },
-      });
+  overrideAnswer(correct) {
+    const s = get();
+    const entry = s.queue[0];
+    if (
+      s.phase !== 'active' ||
+      !entry ||
+      s.busy ||
+      (s.feedback?.kind !== 'correct' && s.feedback?.kind !== 'incorrect')
+    )
+      return;
+    set({
+      feedback: overrideFeedback(entry, correct),
+      notice: null,
+    });
+  },
+
+  async continueNext() {
+    const s = get();
+    const [entry, ...rest] = s.queue;
+    if (s.phase !== 'active' || !entry || s.busy || !s.feedback) return;
+    if (s.feedback.kind === 'retry') {
+      set({ feedback: null });
       return;
     }
-
-    if (verdict.verdict === 'incorrect') {
+    if (s.feedback.kind === 'incorrect') {
+      // Only confirmed mistakes count. Changing this attempt back to correct
+      // never removes mistakes that were already confirmed on earlier attempts.
+      const idx = reinsertIndex(rest.length, rng);
       set({
+        queue: [...rest.slice(0, idx), entry, ...rest.slice(idx)],
         incorrectCounts: {
           ...s.incorrectCounts,
           [entry.card.id]: (s.incorrectCounts[entry.card.id] ?? 0) + 1,
         },
-        feedback: { kind: 'incorrect', accepted: ctx.accepted },
+        feedback: null,
+        notice: null,
       });
       return;
     }
 
-    // correct or correctWithTypo → commit with the accumulated wrong tries.
-    // busy gates double-Enter (a second submit during the transaction would
-    // otherwise commit the same card twice); the sessionId check discards the
-    // continuation if the session was reset/replaced while awaiting.
-    set({ busy: true });
+    // Commit the confirmed result once. Keep feedback while saving so a failed
+    // save can retry Continue without re-grading the learner's override.
+    set({ busy: true, notice: null });
     try {
       const incorrectCount = s.incorrectCounts[entry.card.id] ?? 0;
       let res;
@@ -207,12 +225,7 @@ export const useSession = create<SessionState>((set, get) => ({
             return;
           }
           set({
-            feedback: {
-              kind: 'retry',
-              reason: 'empty',
-              message: `Couldn't save the answer (${(err as Error).message.slice(0, 80)}) — submit the answer again to retry.`,
-              nonce: Date.now(),
-            },
+            notice: `Couldn't save the answer (${(err instanceof Error ? err.message : String(err)).slice(0, 80)}). Continue again to retry.`,
           });
         }
         return;
@@ -233,49 +246,21 @@ export const useSession = create<SessionState>((set, get) => ({
       set({
         completed: [...after.completed, done],
         lastCommit: done,
-        feedback: {
-          kind: 'correct',
-          typo: verdict.verdict === 'correctWithTypo',
-          toStage: res.toStage,
-          burned: res.burned,
-        },
+        queue: after.queue.slice(1),
+        feedback: null,
+        phase: after.queue.length === 1 ? 'summary' : 'active',
       });
     } finally {
       if (get().sessionId === s.sessionId) set({ busy: false });
     }
   },
 
-  continueNext() {
-    const s = get();
-    if (s.busy || !s.feedback) return;
-    if (s.feedback.kind === 'retry') {
-      set({ feedback: null });
-      return;
-    }
-    const [current, ...rest] = s.queue;
-    if (s.feedback.kind === 'correct') {
-      set({
-        queue: rest,
-        feedback: null,
-        phase: rest.length === 0 ? 'summary' : 'active',
-      });
-      return;
-    }
-    // incorrect → reinsert 4–8 ahead and ask again later
-    const idx = reinsertIndex(rest.length, rng);
-    const requeued = [...rest.slice(0, idx), current, ...rest.slice(idx)];
-    set({ queue: requeued, feedback: null });
-  },
-
   async undo() {
     const s = get();
     if (s.busy) return; // never race an in-flight commit
-    // Case 1: a wrong answer is on screen but not yet committed — cancel the mark.
-    if (s.feedback?.kind === 'incorrect') {
-      const entry = s.queue[0];
-      const counts = { ...s.incorrectCounts };
-      if (entry) counts[entry.card.id] = Math.max(0, (counts[entry.card.id] ?? 0) - 1);
-      set({ incorrectCounts: counts, feedback: null });
+    // Case 1: cancel the current provisional answer, leaving prior attempts.
+    if (s.feedback) {
+      set({ feedback: null, notice: null });
       return;
     }
     // Case 2: revert the last committed answer (single-step).
@@ -294,12 +279,9 @@ export const useSession = create<SessionState>((set, get) => ({
         return;
       }
       const { entry, incorrectCount } = s.lastCommit;
-      const stillQueued = after.feedback?.kind === 'correct'; // haven't advanced yet
       const restoredEntry = { ...entry, card: restored };
       set({
-        queue: stillQueued
-          ? [restoredEntry, ...after.queue.slice(1)]
-          : [restoredEntry, ...after.queue],
+        queue: [restoredEntry, ...after.queue],
         completed: after.completed.filter((c) => c.logId !== s.lastCommit!.logId),
         incorrectCounts: { ...after.incorrectCounts, [entry.card.id]: incorrectCount },
         feedback: null,
@@ -326,7 +308,7 @@ export const useSession = create<SessionState>((set, get) => ({
     set({
       queue: kept,
       wrapUp: true,
-      totalCards: s.completed.length + kept.length - (s.feedback?.kind === 'correct' ? 1 : 0),
+      totalCards: s.completed.length + kept.length,
     });
   },
 

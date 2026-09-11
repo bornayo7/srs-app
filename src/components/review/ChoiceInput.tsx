@@ -32,6 +32,17 @@ export function ChoiceInput({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (busy || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      // Let focused controls (including answer overrides) handle their own keys.
+      // Disabled answer options may retain focus after grading; Enter still advances there.
+      if (
+        e.defaultPrevented ||
+        e.isComposing ||
+        (e.target instanceof Element &&
+          e.target.closest(
+            'button:not(:disabled), a[href], input, textarea, select, [contenteditable="true"], [role="button"]',
+          ))
+      )
+        return;
       if (e.key === 'Enter') {
         e.preventDefault();
         if (graded) onContinue();

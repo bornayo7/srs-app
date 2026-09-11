@@ -41,8 +41,9 @@ describe('one prepared-question contract', () => {
     expect(entry.choices).toHaveLength(4);
     await useSession.getState().submit(entry.choices!.find((o) => !o.correct)!.text);
     expect(useSession.getState().feedback?.kind).toBe('incorrect');
-    useSession.getState().continueNext();
+    await useSession.getState().continueNext();
     await useSession.getState().submit(entry.choices!.find((o) => o.correct)!.text);
+    await useSession.getState().continueNext();
     expect(await db.cards.get(entry.card.id)).toMatchObject({
       stats: { reviews: 1, correct: 0, lapses: 1 },
     });

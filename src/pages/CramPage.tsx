@@ -6,6 +6,7 @@ import type { Card } from '@/engine/types';
 import { mulberry32, seededShuffle } from '@/engine/queue';
 import { DAY } from '@/engine/time';
 import {
+  overrideFeedback,
   practiceFeedback,
   type Feedback,
   type SessionEntry,
@@ -178,11 +179,14 @@ export default function CramPage() {
           key={entry.card.id}
           entry={entry}
           feedback={feedback}
+          onOverride={(correct) => {
+            if (!feedbackLock.current) return;
+            setFeedback(overrideFeedback(entry, correct));
+          }}
           onSubmit={(text) => {
             if (feedbackLock.current) return;
             const next = practiceFeedback(entry, text);
             feedbackLock.current = next.kind !== 'retry';
-            if (next.kind === 'incorrect') setMisses((m) => new Set([...m, entry.card.id]));
             setFeedback(next);
           }}
           onContinue={() => {
@@ -193,6 +197,7 @@ export default function CramPage() {
               if (rest.length === 0) setPhase('done');
               setQueue(rest);
             } else if (feedback?.kind === 'incorrect') {
+              setMisses((m) => new Set([...m, current.card.id]));
               setQueue([...rest, current]); // recycle to the end
             }
             setFeedback(null);

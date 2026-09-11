@@ -29,6 +29,9 @@ Everything lives in your browser (IndexedDB). No accounts, no server, one-click 
   the real grading pipeline first, so a "wrong" option can never be a synonym or a typo-range
   twin of the answer. Correct answers commit exactly like a typed one
 - **Lessons**: batched study + quiz gate with a daily new-item limit
+- **Answer overrides**: switch a graded answer with **Mark correct** or **Mark wrong** in
+  reviews, lesson quizzes, and cram. **Continue** confirms the result; earlier confirmed
+  mistakes still count. Reviews update the schedule only after confirmation
 - **Ghost reviews** (Bunpro-style): missed cards spawn short-cycle drill ghosts that graduate
   and vanish, without touching the parent card's schedule
 - **Sentence cloze**: fill-in-the-blank inside rotating example sentences
